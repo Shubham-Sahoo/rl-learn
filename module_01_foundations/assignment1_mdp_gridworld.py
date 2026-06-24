@@ -73,7 +73,26 @@ class GridWorld:
         gamma : discount factor ∈ [0, 1).
         slip  : probability of a perpendicular move ∈ [0, 1).
         """
-        raise NotImplementedError
+        self.grid = grid
+        self.gamma = gamma
+        self.slip = slip
+        self.n_rows = len(grid)
+        self.n_cols = len(grid[0])
+
+        # Build set of valid states (non-wall cells)
+        self.states: List[Tuple] = []
+        self.terminal: set = set()
+        self.walls: set = set()
+
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                cell = grid[r][c]
+                if cell == 'W':
+                    self.walls.add((r, c))
+                else:
+                    self.states.append((r, c))
+                    if cell in ('G', 'H'):
+                        self.terminal.add((r, c))
 
     def _reward(self, state: Tuple) -> float:
         """
@@ -81,7 +100,13 @@ class GridWorld:
 
         +1.0 for goal 'G', -1.0 for hole 'H', 0.0 otherwise.
         """
-        raise NotImplementedError
+        r, c = state
+        cell = self.grid[r][c]
+        if cell == 'G':
+            return 1.0
+        elif cell == 'H':
+            return -1.0
+        return 0.0
 
     def _next_state(self, state: Tuple, action: int) -> Tuple:
         """
@@ -90,57 +115,67 @@ class GridWorld:
         If the resulting position is out-of-bounds or a wall, return `state` unchanged
         (the agent bounces back).
         """
-        raise NotImplementedError
+        r, c = state
+        dr, dc = self.ACTIONS[action]
+        nr, nc = r + dr, c + dc
+        if 0 <= nr < self.n_rows and 0 <= nc < self.n_cols and (nr, nc) not in self.walls:
+            return (nr, nc)
+        return state
 
     def get_transitions(self, state: Tuple, action: int) -> List[Tuple[float, Tuple, float, bool]]:
         """
         Return the full transition distribution for (state, action).
 
         Returns a list of tuples: (probability, next_state, reward, done).
-
-        Special cases:
-        - If `state` is terminal, return [(1.0, state, 0.0, True)] — the episode is over,
-          no reward is collected and the agent stays in the absorbing terminal state.
-        - If slip == 0, the list has exactly one entry with probability 1.0.
-        - If slip > 0, merge probabilities for identical next_states (so the list never has
-          duplicate next_states).
-
-        Steps to implement:
-        1. Return early if state is terminal.
-        2. Compute perpendicular actions: left = (action - 1) % 4, right = (action + 1) % 4.
-        3. Build a raw list: [(1 - slip, intended), (slip/2, perp_left), (slip/2, perp_right)].
-        4. For each (prob, act), compute next_state = self._next_state(state, act).
-        5. Merge: accumulate probabilities for identical next_states into a dict, then convert
-           back to a list of (prob, next_state, reward, done) tuples.
-        6. reward = self._reward(next_state); done = next_state in self.terminal.
         """
-        raise NotImplementedError
+        # Terminal states absorb
+        if state in self.terminal:
+            return [(1.0, state, 0.0, True)]
+
+        # Build raw (prob, action) list
+        perp_left = (action - 1) % 4
+        perp_right = (action + 1) % 4
+        raw = [
+            (1.0 - self.slip, action),
+            (self.slip / 2, perp_left),
+            (self.slip / 2, perp_right),
+        ]
+
+        # Merge probabilities for identical next_states
+        prob_dict: Dict[Tuple, float] = {}
+        for prob, act in raw:
+            if prob == 0.0:
+                continue
+            ns = self._next_state(state, act)
+            prob_dict[ns] = prob_dict.get(ns, 0.0) + prob
+
+        transitions = []
+        for ns, prob in prob_dict.items():
+            reward = self._reward(ns)
+            done = ns in self.terminal
+            transitions.append((prob, ns, reward, done))
+        return transitions
 
     def policy_evaluation(self, policy: Dict[Tuple, int], theta: float = 1e-6) -> Dict[Tuple, float]:
         """
-        Iterative policy evaluation. Repeatedly apply:
-
-            V(s) ← Σ_{s'} P(s'|s,π(s)) [R(s,π(s),s') + γ V(s')]
-
-        until max_s |V_new(s) - V_old(s)| < theta.
-
-        Returns V: dict mapping each state → float value.
-
-        Common mistakes to avoid:
-        - Do NOT update terminal states; their value is always 0.
-        - Use the value from the *start* of the sweep (synchronous update), not in-place
-          updates within a sweep — or equivalently, use in-place but track delta correctly.
-          (Either synchronous or in-place/asynchronous converges; synchronous is cleaner.)
-
-        Steps to implement:
-        1. Initialize V = {s: 0.0 for s in self.states}.
-        2. Outer loop: repeat until delta < theta.
-        3. Inner loop: for each non-terminal state s, compute the Bellman update using
-           self.get_transitions(s, policy[s]).
-        4. Track delta = max over all states of |V_new(s) - V_old(s)|.
-        5. Return V.
+        Iterative policy evaluation.
         """
-        raise NotImplementedError
+        V = {s: 0.0 for s in self.states}
+
+        while True:
+            delta = 0.0
+            for s in self.states:
+                if s in self.terminal:
+                    continue
+                a = policy[s]
+                v_new = 0.0
+                for prob, ns, reward, done in self.get_transitions(s, a):
+                    v_new += prob * (reward + self.gamma * V.get(ns, 0.0))
+                delta = max(delta, abs(v_new - V[s]))
+                V[s] = v_new
+            if delta < theta:
+                break
+        return V
 
     def visualize_values(self,
                          V: Dict[Tuple, float],
@@ -148,19 +183,58 @@ class GridWorld:
                          title: str = "Value Function"):
         """
         Visualize the value function as a heatmap. Optionally overlay policy arrows.
-
-        Steps to implement:
-        1. Create a 2-D numpy array `grid_vals` of shape (n_rows, n_cols) filled with np.nan.
-        2. Fill in grid_vals[r][c] = V[(r,c)] for each non-wall, non-terminal state.
-           Set terminal 'G' cells to +1.0 and 'H' cells to -1.0 for visual clarity.
-        3. Use plt.imshow(grid_vals, cmap='RdYlGn', vmin=-1, vmax=1) for a red-yellow-green
-           color scale (red = bad, green = good).
-        4. Annotate each non-wall cell with its value (2 decimal places).
-        5. If policy is provided, overlay ACTION_NAMES arrows on non-terminal states.
-        6. Mark wall cells as black (set their alpha or fill with a black patch).
-        7. Add title, colorbar, and plt.tight_layout(); call plt.show().
         """
-        raise NotImplementedError
+        grid_vals = np.full((self.n_rows, self.n_cols), np.nan)
+
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                state = (r, c)
+                if state in self.walls:
+                    continue
+                cell = self.grid[r][c]
+                if cell == 'G':
+                    grid_vals[r][c] = 1.0
+                elif cell == 'H':
+                    grid_vals[r][c] = -1.0
+                else:
+                    grid_vals[r][c] = V.get(state, 0.0)
+
+        fig, ax = plt.subplots(figsize=(self.n_cols * 1.2, self.n_rows * 1.2))
+        im = ax.imshow(grid_vals, cmap='RdYlGn', vmin=-1, vmax=1, aspect='equal')
+
+        # Mark walls black
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                if (r, c) in self.walls:
+                    ax.add_patch(plt.Rectangle((c - 0.5, r - 0.5), 1, 1, color='black'))
+
+        # Annotate cells
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                state = (r, c)
+                if state in self.walls:
+                    continue
+                val = grid_vals[r][c]
+                if not np.isnan(val):
+                    ax.text(c, r, f'{val:.2f}', ha='center', va='center',
+                            fontsize=8, color='black')
+
+        # Overlay policy arrows
+        if policy is not None:
+            for s in self.states:
+                if s in self.terminal:
+                    continue
+                r, c = s
+                if s in policy:
+                    ax.text(c, r - 0.3, self.ACTION_NAMES[policy[s]],
+                            ha='center', va='center', fontsize=12, color='navy')
+
+        ax.set_title(title)
+        ax.set_xticks(range(self.n_cols))
+        ax.set_yticks(range(self.n_rows))
+        plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.show()
 
 
 # %% [markdown]
@@ -197,19 +271,23 @@ print("✓ Terminal state values correct")
 
 # %%
 # Ablation 1: myopic agent
-# TODO: create GridWorld with gamma=0.1, evaluate same policy, visualize, compare
+env_myopic = GridWorld(GRID, gamma=0.1, slip=0.1)
+V_myopic = env_myopic.policy_evaluation(uniform_policy)
+env_myopic.visualize_values(V_myopic, uniform_policy, "Myopic Agent (gamma=0.1)")
 
 # %% [markdown]
-# **Observation (fill in):** With gamma=0.1, states far from the goal have values close to ___
-# because ___.
+# **Observation (fill in):** With gamma=0.1, states far from the goal have values close to 0
+# because future rewards are discounted so heavily they contribute negligibly.
 
 # %%
 # Ablation 2: slip=0.3 (very stochastic environment)
-# TODO: evaluate same policy with slip=0.3; note how uncertainty degrades values near holes
+env_stoch = GridWorld(GRID, gamma=0.99, slip=0.3)
+V_stoch = env_stoch.policy_evaluation(uniform_policy)
+env_stoch.visualize_values(V_stoch, uniform_policy, "Stochastic Environment (slip=0.3)")
 
 # %% [markdown]
-# **Observation (fill in):** With slip=0.3, the value of states adjacent to holes ___
-# compared to slip=0.0 because ___.
+# **Observation (fill in):** With slip=0.3, the value of states adjacent to holes decreases
+# compared to slip=0.0 because there is a higher probability of accidentally falling into a hole.
 
 # %% [markdown]
 # ## Part 5: Reflection
@@ -226,6 +304,11 @@ print("✓ Terminal state values correct")
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
-# 3.
+# 1. The Markov property ensures that V(s) depends only on the current state s, not the history.
+#    Without it, we cannot define a consistent Bellman backup since the value of s would depend
+#    on how we arrived at s.
+# 2. With a single end-of-response reward, earlier tokens receive no direct credit signal —
+#    analogous to states far from the goal in GridWorld. The agent must propagate reward backwards
+#    through the trajectory, which is the credit assignment problem.
+# 3. If gamma=1 and there are no terminal states, the Bellman updates never converge because
+#    returns are infinite sums that do not contract to a fixed point.

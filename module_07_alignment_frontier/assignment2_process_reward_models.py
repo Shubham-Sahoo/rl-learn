@@ -62,9 +62,14 @@ class ProcessRewardModel(nn.Module):
 
     def __init__(self, input_dim: int = 64, hidden_dim: int = 256):
         super().__init__()
-        # TODO: MLP(input_dim → hidden_dim → hidden_dim → 1) with sigmoid output
-        # Use ReLU activations between hidden layers.
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
 
     def forward(self, step_embedding: torch.Tensor) -> torch.Tensor:
         """Return step score in [0,1] of shape (batch,).
@@ -75,7 +80,7 @@ class ProcessRewardModel(nn.Module):
         Returns:
             scores: Shape (batch,) with values in [0, 1]
         """
-        raise NotImplementedError
+        return self.net(step_embedding).squeeze(-1)
 
 # %% [markdown]
 # ## Part 2: Monte Carlo Step Labeling
@@ -110,7 +115,13 @@ def monte_carlo_step_label(solution_steps: List[str], step_idx: int,
     Returns:
         label: Float in [0, 1] — fraction of rollouts reaching the correct answer
     """
-    raise NotImplementedError
+    prefix = " ".join(solution_steps[:step_idx + 1])
+    successes = 0
+    for _ in range(n_rollouts):
+        completion = policy_fn(prefix)
+        if oracle_fn(completion):
+            successes += 1
+    return successes / n_rollouts
 
 
 def label_all_steps(solution_steps: List[str],
@@ -161,8 +172,16 @@ def score_solution_with_prm(prm: ProcessRewardModel,
     Returns:
         score: Float scalar
     """
-    # TODO: forward pass through PRM for each step embedding, then aggregate
-    raise NotImplementedError
+    prm.eval()
+    with torch.no_grad():
+        scores = [prm(emb).item() for emb in step_embeddings]
+    if aggregation == "min":
+        return float(min(scores))
+    else:  # product
+        result = 1.0
+        for s in scores:
+            result *= s
+        return result
 
 
 def best_of_n_with_prm(policy_fn: Callable[[str], Tuple[str, List[torch.Tensor]]],
@@ -184,7 +203,15 @@ def best_of_n_with_prm(policy_fn: Callable[[str], Tuple[str, List[torch.Tensor]]
     Returns:
         best_solution: The solution string with the highest PRM score
     """
-    raise NotImplementedError
+    best_solution = None
+    best_score = float("-inf")
+    for _ in range(n):
+        solution_str, step_embeddings = policy_fn(prompt)
+        score = score_solution_with_prm(prm, step_embeddings, aggregation=aggregation)
+        if score > best_score:
+            best_score = score
+            best_solution = solution_str
+    return best_solution
 
 
 def prm_beam_search(policy_step_fn: Callable[[str], List[Tuple[str, torch.Tensor]]],
@@ -207,7 +234,28 @@ def prm_beam_search(policy_step_fn: Callable[[str], List[Tuple[str, torch.Tensor
     Returns:
         best_solution: The complete solution string from the top beam
     """
-    raise NotImplementedError
+    # beams: list of (cumulative_score, prefix_str, step_embeddings_so_far)
+    beams = [(1.0, prompt, [])]
+
+    for _ in range(max_steps):
+        candidates = []
+        for cum_score, prefix, embs_so_far in beams:
+            # Expand: get multiple next-step candidates
+            next_steps = policy_step_fn(prefix)
+            for step_str, step_emb in next_steps:
+                step_score = prm(step_emb).item()
+                new_cum_score = cum_score * step_score
+                new_prefix = prefix + " " + step_str
+                new_embs = embs_so_far + [step_emb]
+                candidates.append((new_cum_score, new_prefix, new_embs))
+        # Keep top beam_width
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        beams = candidates[:beam_width]
+
+    # Return top beam
+    best_prefix = beams[0][1]
+    # Strip the initial prompt to get just the solution
+    return best_prefix[len(prompt):].strip()
 
 # %% [markdown]
 # ## Part 4: Toy Math Task — Training and Evaluation

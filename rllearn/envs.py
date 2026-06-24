@@ -10,12 +10,12 @@ def make_env(env_id: str, seed: int = 0, record_video: bool = False,
     Implemented in: Module 02, Assignment 2.
     Used in: all modules.
     """
-    # TODO (Module 02, A2):
-    # 1. gym.make(env_id, render_mode="rgb_array" if record_video else None)
-    # 2. wrap with RecordEpisodeStatistics
-    # 3. wrap with RecordVideo if record_video
-    # 4. env.reset(seed=seed)
-    raise NotImplementedError
+    env = gym.make(env_id, render_mode="rgb_array" if record_video else None)
+    env = gym.wrappers.RecordEpisodeStatistics(env)
+    if record_video:
+        env = gym.wrappers.RecordVideo(env, video_folder)
+    env.reset(seed=seed)
+    return env
 
 
 class NormalizeObsWrapper(gym.ObservationWrapper):
@@ -26,9 +26,18 @@ class NormalizeObsWrapper(gym.ObservationWrapper):
 
     def __init__(self, env: gym.Env, epsilon: float = 1e-8):
         super().__init__(env)
-        # TODO (Module 03, A3): maintain running mean and var (Welford's algorithm)
-        raise NotImplementedError
+        self.epsilon = epsilon
+        obs_shape = env.observation_space.shape
+        self.obs_mean = np.zeros(obs_shape, dtype=np.float64)
+        self.obs_var = np.ones(obs_shape, dtype=np.float64)
+        self.count = 0
 
     def observation(self, obs: np.ndarray) -> np.ndarray:
-        # TODO: normalize obs using running stats
-        raise NotImplementedError
+        # Update running stats (Welford's algorithm)
+        self.count += 1
+        delta = obs - self.obs_mean
+        self.obs_mean += delta / self.count
+        delta2 = obs - self.obs_mean
+        self.obs_var += (delta * delta2 - self.obs_var) / self.count
+        # Normalize
+        return (obs - self.obs_mean) / (np.sqrt(self.obs_var) + self.epsilon)

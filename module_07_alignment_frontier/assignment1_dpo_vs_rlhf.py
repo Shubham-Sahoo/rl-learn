@@ -100,8 +100,22 @@ def get_sequence_log_probs(model: nn.Module, input_ids: torch.Tensor,
     Returns:
         log_prob_sum: Shape (batch,) — sum of log P(token | context) for response tokens
     """
-    # TODO: forward pass → gather log-probs of actual tokens → sum over response slice
-    raise NotImplementedError
+    logits = model(input_ids).logits  # (batch, seq_len, vocab)
+    log_probs = F.log_softmax(logits, dim=-1)  # (batch, seq_len, vocab)
+
+    # logits[t] predicts token t+1, so shift by 1
+    # response tokens start at response_start_idx in input_ids
+    # log-probs for response positions: indices response_start_idx..seq_len-1 in logits
+    # corresponding target tokens: input_ids[:, response_start_idx+1..seq_len]
+    response_log_probs = log_probs[:, response_start_idx:-1, :]  # (batch, resp_len, vocab)
+    response_tokens = input_ids[:, response_start_idx + 1:]       # (batch, resp_len)
+
+    # Gather log-prob of each actual token
+    token_log_probs = response_log_probs.gather(
+        2, response_tokens.unsqueeze(-1)
+    ).squeeze(-1)  # (batch, resp_len)
+
+    return token_log_probs.sum(dim=-1)  # (batch,)
 
 
 def dpo_loss(policy_model: nn.Module, ref_model: nn.Module,
@@ -127,7 +141,19 @@ def dpo_loss(policy_model: nn.Module, ref_model: nn.Module,
     Returns:
         loss: Scalar DPO loss
     """
-    raise NotImplementedError
+    # Log-probs under policy model (gradient flows)
+    log_pi_w = get_sequence_log_probs(policy_model, input_ids_w, prompt_length)
+    log_pi_l = get_sequence_log_probs(policy_model, input_ids_l, prompt_length)
+
+    # Log-probs under reference model (no gradient)
+    with torch.no_grad():
+        log_ref_w = get_sequence_log_probs(ref_model, input_ids_w, prompt_length)
+        log_ref_l = get_sequence_log_probs(ref_model, input_ids_l, prompt_length)
+
+    # Implicit reward difference
+    reward_diff = beta * ((log_pi_w - log_ref_w) - (log_pi_l - log_ref_l))
+    loss = -F.logsigmoid(reward_diff).mean()
+    return loss
 
 
 def compute_implicit_reward(policy_model: nn.Module, ref_model: nn.Module,
@@ -148,7 +174,10 @@ def compute_implicit_reward(policy_model: nn.Module, ref_model: nn.Module,
     Returns:
         implicit_reward: Shape (batch,)
     """
-    raise NotImplementedError
+    log_pi = get_sequence_log_probs(policy_model, input_ids, prompt_length)
+    with torch.no_grad():
+        log_ref = get_sequence_log_probs(ref_model, input_ids, prompt_length)
+    return beta * (log_pi - log_ref)
 
 # %% [markdown]
 # ## Part 2: Verify Your DPO Loss
@@ -170,8 +199,34 @@ def test_dpo_loss_at_initialization() -> bool:
     At initialization (policy = reference), DPO loss ≈ log(2) ≈ 0.693.
     Tests that your implementation has the correct sign and baseline value.
     """
-    # TODO: create two tiny identical models, create dummy input_ids, assert loss ≈ 0.693
-    raise NotImplementedError
+    if not TRANSFORMERS_AVAILABLE:
+        return True  # skip when transformers not installed
+    import math
+    vocab_size = 50
+    seq_len = 10
+    prompt_length = 3
+
+    class TinyLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(vocab_size, 8)
+            self.proj = nn.Linear(8, vocab_size)
+        def forward(self, input_ids):
+            class Out:
+                pass
+            out = Out()
+            out.logits = self.proj(self.embed(input_ids))
+            return out
+
+    torch.manual_seed(0)
+    policy = TinyLM()
+    ref = TinyLM()
+    ref.load_state_dict(policy.state_dict())
+
+    input_ids = torch.randint(0, vocab_size, (2, seq_len))
+    loss = dpo_loss(policy, ref, input_ids, input_ids, beta=0.1, prompt_length=prompt_length)
+    expected = math.log(2)
+    return abs(loss.item() - expected) < 0.01
 
 
 def test_gradient_direction() -> bool:
@@ -179,8 +234,42 @@ def test_gradient_direction() -> bool:
     After one DPO gradient step, the implicit reward for the winner should be
     strictly greater than for the loser (reward_winner > reward_loser).
     """
-    # TODO: create tiny models, one gradient step, check implicit rewards
-    raise NotImplementedError
+    if not TRANSFORMERS_AVAILABLE:
+        return True
+    vocab_size = 50
+    seq_len = 10
+    prompt_length = 3
+
+    class TinyLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(vocab_size, 8)
+            self.proj = nn.Linear(8, vocab_size)
+        def forward(self, input_ids):
+            class Out:
+                pass
+            out = Out()
+            out.logits = self.proj(self.embed(input_ids))
+            return out
+
+    torch.manual_seed(0)
+    policy = TinyLM()
+    ref = TinyLM()
+    ref.load_state_dict(policy.state_dict())
+
+    input_ids_w = torch.randint(0, vocab_size, (1, seq_len))
+    input_ids_l = torch.randint(0, vocab_size, (1, seq_len))
+
+    optimizer = torch.optim.Adam(policy.parameters(), lr=1e-2)
+    loss = dpo_loss(policy, ref, input_ids_w, input_ids_l, beta=0.1, prompt_length=prompt_length)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    with torch.no_grad():
+        r_w = compute_implicit_reward(policy, ref, input_ids_w, beta=0.1, prompt_length=prompt_length)
+        r_l = compute_implicit_reward(policy, ref, input_ids_l, beta=0.1, prompt_length=prompt_length)
+    return r_w.item() > r_l.item()
 
 
 # Run tests (uncomment after implementing)

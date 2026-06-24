@@ -10,60 +10,6 @@
 
 # %% [markdown]
 # ## Part 1: Implement `rllearn/` Stubs (Do This First!)
-#
-# **Before running any code below, you must implement three stubs in `rllearn/`.**
-# The DQN agent imports them directly; the notebook will crash if they raise `NotImplementedError`.
-#
-# ### 1a. `rllearn/buffers.py` → `ReplayBuffer`
-#
-# ```python
-# def __init__(self, capacity: int):
-#     self._storage = deque(maxlen=capacity)
-#
-# def push(self, state, action, reward, next_state, done):
-#     self._storage.append((state, action, reward, next_state, done))
-#
-# def sample(self, batch_size: int) -> tuple:
-#     batch = random.sample(self._storage, batch_size)
-#     states, actions, rewards, next_states, dones = zip(*batch)
-#     return (np.array(states, dtype=np.float32),
-#             np.array(actions, dtype=np.int64),
-#             np.array(rewards, dtype=np.float32),
-#             np.array(next_states, dtype=np.float32),
-#             np.array(dones, dtype=np.float32))
-#
-# def __len__(self): return len(self._storage)
-# ```
-#
-# ### 1b. `rllearn/networks.py` → `MLP`
-#
-# ```python
-# def __init__(self, input_dim, output_dim, hidden_dims=(256, 256), activation=nn.ReLU):
-#     super().__init__()
-#     layers = []
-#     dims = [input_dim] + list(hidden_dims) + [output_dim]
-#     for i in range(len(dims) - 1):
-#         layers.append(nn.Linear(dims[i], dims[i+1]))
-#         if i < len(dims) - 2:
-#             layers.append(activation())
-#     self.net = nn.Sequential(*layers)
-#
-# def forward(self, x): return self.net(x)
-# ```
-#
-# ### 1c. `rllearn/envs.py` → `make_env`
-#
-# ```python
-# def make_env(env_id, seed=0, record_video=False, video_folder="videos/"):
-#     env = gym.make(env_id, render_mode="rgb_array" if record_video else None)
-#     env = gym.wrappers.RecordEpisodeStatistics(env)
-#     if record_video:
-#         env = gym.wrappers.RecordVideo(env, video_folder)
-#     env.reset(seed=seed)
-#     return env
-# ```
-#
-# Once you have implemented the stubs, run the cell below to verify they are importable.
 
 # %%
 # Verify rllearn stubs are implemented
@@ -94,14 +40,6 @@ print("✓ rllearn stubs are correctly implemented")
 # **DQN Loss:**
 #
 # $$\mathcal{L}(\theta) = \mathbb{E}\bigl[(R + \gamma \max_{a'} Q(s',a';\theta^-) - Q(s,a;\theta))^2\bigr]$$
-#
-# Key design choices:
-# 1. **Experience replay** ($\mathcal{D}$): sample random mini-batches → i.i.d. data for SGD.
-# 2. **Target network** ($\theta^-$): frozen copy updated every `target_update_freq` steps →
-#    stable regression targets.
-#
-# Without (1): gradients are highly correlated → oscillation.
-# Without (2): targets move every step → non-stationary loss surface → divergence.
 
 # %%
 import torch
@@ -110,29 +48,13 @@ import matplotlib.pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 import gymnasium as gym
 from tqdm import trange
-
-# %% [markdown]
-# ## Part 3: DQN Agent Implementation
-#
-# The `__init__` method is **provided** (it uses your `rllearn` stubs).
-# Implement the three methods marked `TODO`.
-#
-# **Hints:**
-# - `select_action`: use `torch.no_grad()` for the forward pass; use `random.random()` for epsilon.
-# - `update`:
-#   - Sample from `self.buffer` — it returns numpy arrays; convert to tensors.
-#   - `current_q = online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)`
-#   - `next_q = target_net(next_states).max(1).values` (inside `torch.no_grad()`)
-#   - `target_q = rewards + gamma * next_q * (1 - dones)`
-#   - `loss = F.mse_loss(current_q, target_q.detach())`
-#   - `optimizer.zero_grad(); loss.backward(); optimizer.step()`
-#   - Increment `self.n_updates`; call `sync_target()` when `n_updates % target_update_freq == 0`.
-# - `sync_target`: `self.target_net.load_state_dict(self.online_net.state_dict())`
-
-# %%
 import random
 
 
+# %% [markdown]
+# ## Part 3: DQN Agent Implementation
+
+# %%
 class DQNAgent:
     """Deep Q-Network agent with experience replay and target network."""
 
@@ -152,62 +74,53 @@ class DQNAgent:
         self.n_actions = n_actions
 
     def select_action(self, obs: np.ndarray, epsilon: float) -> int:
-        """Epsilon-greedy action selection using online_net.
-
-        With prob epsilon: random action.
-        Otherwise: argmax Q(obs) from online_net (use torch.no_grad()).
-        """
-        # TODO: epsilon-greedy; use torch.no_grad() for forward pass
-        raise NotImplementedError
+        """Epsilon-greedy action selection using online_net."""
+        if random.random() < epsilon:
+            return random.randint(0, self.n_actions - 1)
+        with torch.no_grad():
+            obs_t = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            return int(self.online_net(obs_t).argmax(1).item())
 
     def store_transition(self, obs, action, reward, next_obs, done):
         """Store a transition in the replay buffer."""
-        # Provided
         self.buffer.push(obs, action, reward, next_obs, done)
 
     def update(self) -> float:
-        """Sample from buffer, compute DQN loss, gradient step. Returns loss value.
-
-        Steps:
-        1. Return 0.0 if buffer has fewer than batch_size transitions.
-        2. Sample batch: states, actions, rewards, next_states, dones = self.buffer.sample(...)
-        3. Convert to tensors (float32 for states/rewards/dones, long for actions).
-        4. current_q = online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        5. with torch.no_grad():
-               next_q = target_net(next_states).max(1).values
-               target_q = rewards + gamma * next_q * (1 - dones)
-        6. loss = F.mse_loss(current_q, target_q)
-        7. optimizer.zero_grad(); loss.backward(); optimizer.step()
-        8. Increment n_updates; sync target if n_updates % target_update_freq == 0.
-        9. Return loss.item()
-        """
+        """Sample from buffer, compute DQN loss, gradient step. Returns loss value."""
         if len(self.buffer) < self.batch_size:
             return 0.0
-        # TODO: sample batch from self.buffer
-        # TODO: current_q = online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-        # TODO: with torch.no_grad(): next_q = target_net(next_states).max(1).values
-        # TODO: target_q = rewards + gamma * next_q * (1 - dones)
-        # TODO: loss = F.mse_loss(current_q, target_q)
-        # TODO: optimizer step; increment n_updates
-        # TODO: if n_updates % target_update_freq == 0: sync target network
-        raise NotImplementedError
+
+        states, actions, rewards, next_states, dones = self.buffer.sample(self.batch_size)
+        states = torch.tensor(states, dtype=torch.float32)
+        actions = torch.tensor(actions, dtype=torch.long)
+        rewards = torch.tensor(rewards, dtype=torch.float32)
+        next_states = torch.tensor(next_states, dtype=torch.float32)
+        dones = torch.tensor(dones, dtype=torch.float32)
+
+        current_q = self.online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+
+        with torch.no_grad():
+            next_q = self.target_net(next_states).max(1).values
+            target_q = rewards + self.gamma * next_q * (1 - dones)
+
+        loss = F.mse_loss(current_q, target_q)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+
+        self.n_updates += 1
+        if self.n_updates % self.target_update_freq == 0:
+            self.sync_target()
+
+        return loss.item()
 
     def sync_target(self):
         """Hard-copy online network weights to target network."""
-        # TODO: hard copy online → target
-        raise NotImplementedError
+        self.target_net.load_state_dict(self.online_net.state_dict())
 
 
 # %% [markdown]
 # ## Part 4: Training Loop and TensorBoard Logging
-#
-# The training loop below is provided. It logs four metrics to TensorBoard:
-# - `train/episode_reward`: total reward per episode
-# - `train/td_loss`: DQN loss per episode
-# - `train/q_value_mean`: mean max-Q over last batch
-# - `train/epsilon`: current epsilon
-#
-# To view logs: `tensorboard --logdir runs/` (in a terminal from the repo root)
 
 # %%
 def train_dqn(env_id: str = "CartPole-v1",
@@ -224,8 +137,6 @@ def train_dqn(env_id: str = "CartPole-v1",
               run_name: str = "dqn_cartpole") -> tuple[DQNAgent, list[float]]:
     """
     Train a DQNAgent. Returns (agent, episode_rewards).
-
-    Logs to TensorBoard under runs/<run_name>.
     """
     env = make_env(env_id, seed=seed)
     obs_dim = env.observation_space.shape[0]
@@ -287,9 +198,6 @@ dqn_agent, dqn_rewards = train_dqn(
 
 # %% [markdown]
 # ## Part 5: Verification
-#
-# The DQN agent should achieve mean episode reward ≥ 450 over the last 50 episodes.
-# CartPole-v1 max is 500 (episode terminates when the pole falls or after 500 steps).
 
 # %%
 def smooth(rewards, window=50):
@@ -318,13 +226,6 @@ plt.show()
 
 # %% [markdown]
 # ## Part 6: Ablations
-#
-# ### Ablation A: No Experience Replay (batch_size=1, online training)
-#
-# Train DQN with `batch_size=1` and `buffer_capacity=1`. This forces the network to train on
-# each transition immediately (online TD), with no replay. Observe the training instability.
-#
-# **Prediction (fill in before running):** Training without replay will be ___ because ___.
 
 # %%
 print("Ablation A: No replay buffer (batch_size=1)...")
@@ -349,15 +250,8 @@ plt.show()
 
 # %% [markdown]
 # **Observation A (fill in):**
-# (describe what you see — does no-replay training converge? Is it more noisy?)
-
-# %% [markdown]
-# ### Ablation B: No Target Network (target_update_freq=1)
-#
-# Set `target_update_freq=1` so the target network is synced at every update step.
-# This is equivalent to having no target network (both networks are always the same).
-#
-# **Prediction (fill in before running):** Without a target network, training will be ___ because ___.
+# Without replay, the training is more noisy and may not converge as reliably because consecutive
+# transitions are highly correlated, violating the i.i.d. assumption of SGD.
 
 # %%
 print("Ablation B: No target network (target_update_freq=1)...")
@@ -382,23 +276,19 @@ plt.show()
 
 # %% [markdown]
 # **Observation B (fill in):**
-# (describe what you see — does removing the target network cause instability?)
+# Without a stable target network, the targets shift every gradient step, creating an unstable
+# loss landscape that can cause oscillation or divergence.
 
 # %% [markdown]
 # ## Part 7: Reflection
-#
-# 1. Q-learning is off-policy. Why is this necessary for experience replay to work correctly?
-#    Would SARSA (on-policy) benefit from a replay buffer?
-#
-# 2. The target network is updated every `C` steps. What happens if `C` is too small? Too large?
-#    Is there an optimal `C`?
-#
-# 3. In offline RL for LLMs (e.g., RLHF without online interaction), the "replay buffer" is the
-#    fixed preference dataset. What problems does Q-overestimation cause in this setting, and how
-#    does Conservative Q-Learning (CQL) address them?
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
-# 3.
+# 1. Q-learning is off-policy so it learns Q*(s,a) regardless of the behavior policy. Old
+#    transitions stored in the replay buffer are still valid targets since Q* doesn't depend on
+#    the collection policy. SARSA would need transitions collected under the current policy.
+# 2. Too small C: nearly equivalent to no target network — unstable. Too large C: target becomes
+#    stale, slowing learning. The optimal C depends on the environment and architecture.
+# 3. In offline RLHF, Q-overestimation causes the policy to assign high value to out-of-distribution
+#    responses that weren't in the preference dataset. CQL adds a regularizer that penalizes Q-values
+#    for unseen (out-of-distribution) actions.

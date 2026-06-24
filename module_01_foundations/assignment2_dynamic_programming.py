@@ -61,25 +61,127 @@ class GridWorld:
     ACTION_NAMES = {0: '↑', 1: '→', 2: '↓', 3: '←'}
 
     def __init__(self, grid: List[List[str]], gamma: float = 0.99, slip: float = 0.0):
-        raise NotImplementedError
+        self.grid = grid
+        self.gamma = gamma
+        self.slip = slip
+        self.n_rows = len(grid)
+        self.n_cols = len(grid[0])
+        self.states: List[Tuple] = []
+        self.terminal: set = set()
+        self.walls: set = set()
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                cell = grid[r][c]
+                if cell == 'W':
+                    self.walls.add((r, c))
+                else:
+                    self.states.append((r, c))
+                    if cell in ('G', 'H'):
+                        self.terminal.add((r, c))
 
     def _reward(self, state: Tuple) -> float:
-        raise NotImplementedError
+        r, c = state
+        cell = self.grid[r][c]
+        if cell == 'G':
+            return 1.0
+        elif cell == 'H':
+            return -1.0
+        return 0.0
 
     def _next_state(self, state: Tuple, action: int) -> Tuple:
-        raise NotImplementedError
+        r, c = state
+        dr, dc = self.ACTIONS[action]
+        nr, nc = r + dr, c + dc
+        if 0 <= nr < self.n_rows and 0 <= nc < self.n_cols and (nr, nc) not in self.walls:
+            return (nr, nc)
+        return state
 
     def get_transitions(self, state: Tuple, action: int) -> List[Tuple[float, Tuple, float, bool]]:
-        raise NotImplementedError
+        if state in self.terminal:
+            return [(1.0, state, 0.0, True)]
+        perp_left = (action - 1) % 4
+        perp_right = (action + 1) % 4
+        raw = [
+            (1.0 - self.slip, action),
+            (self.slip / 2, perp_left),
+            (self.slip / 2, perp_right),
+        ]
+        prob_dict: Dict[Tuple, float] = {}
+        for prob, act in raw:
+            if prob == 0.0:
+                continue
+            ns = self._next_state(state, act)
+            prob_dict[ns] = prob_dict.get(ns, 0.0) + prob
+        transitions = []
+        for ns, prob in prob_dict.items():
+            reward = self._reward(ns)
+            done = ns in self.terminal
+            transitions.append((prob, ns, reward, done))
+        return transitions
 
     def policy_evaluation(self, policy: Dict[Tuple, int], theta: float = 1e-6) -> Dict[Tuple, float]:
-        raise NotImplementedError
+        V = {s: 0.0 for s in self.states}
+        while True:
+            delta = 0.0
+            for s in self.states:
+                if s in self.terminal:
+                    continue
+                a = policy[s]
+                v_new = sum(p * (r + self.gamma * V.get(ns, 0.0))
+                            for p, ns, r, done in self.get_transitions(s, a))
+                delta = max(delta, abs(v_new - V[s]))
+                V[s] = v_new
+            if delta < theta:
+                break
+        return V
 
     def visualize_values(self,
                          V: Dict[Tuple, float],
                          policy: Optional[Dict[Tuple, int]] = None,
                          title: str = "Value Function"):
-        raise NotImplementedError
+        grid_vals = np.full((self.n_rows, self.n_cols), np.nan)
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                state = (r, c)
+                if state in self.walls:
+                    continue
+                cell = self.grid[r][c]
+                if cell == 'G':
+                    grid_vals[r][c] = 1.0
+                elif cell == 'H':
+                    grid_vals[r][c] = -1.0
+                else:
+                    grid_vals[r][c] = V.get(state, 0.0)
+
+        fig, ax = plt.subplots(figsize=(self.n_cols * 1.2, self.n_rows * 1.2))
+        im = ax.imshow(grid_vals, cmap='RdYlGn', vmin=-1, vmax=1, aspect='equal')
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                if (r, c) in self.walls:
+                    ax.add_patch(plt.Rectangle((c - 0.5, r - 0.5), 1, 1, color='black'))
+        for r in range(self.n_rows):
+            for c in range(self.n_cols):
+                state = (r, c)
+                if state in self.walls:
+                    continue
+                val = grid_vals[r][c]
+                if not np.isnan(val):
+                    ax.text(c, r, f'{val:.2f}', ha='center', va='center',
+                            fontsize=8, color='black')
+        if policy is not None:
+            for s in self.states:
+                if s in self.terminal:
+                    continue
+                r, c = s
+                if s in policy:
+                    ax.text(c, r - 0.3, self.ACTION_NAMES[policy[s]],
+                            ha='center', va='center', fontsize=12, color='navy')
+        ax.set_title(title)
+        ax.set_xticks(range(self.n_cols))
+        ax.set_yticks(range(self.n_rows))
+        plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        plt.show()
 
 
 # %% [markdown]
@@ -89,59 +191,51 @@ class GridWorld:
 def policy_improvement(env: GridWorld, V: Dict[Tuple, float]) -> Dict[Tuple, int]:
     """
     Greedy policy improvement.
-
-    For each non-terminal state, compute the action-value:
-        Q(s, a) = Σ_{s'} P(s'|s,a) [R(s,a,s') + γ V(s')]
-
-    Then set:
-        π'(s) = argmax_a Q(s, a)
-
-    For terminal states, return any fixed action (e.g., 0) — it does not matter because
-    the episode ends immediately.
-
-    Parameters
-    ----------
-    env : GridWorld instance (provides get_transitions, states, terminal, gamma).
-    V   : dict mapping state → float value (result of policy_evaluation).
-
-    Returns
-    -------
-    new_policy : dict mapping state → int action.
-
-    Common mistake: forgetting terminal states in the output dict — make sure every state
-    in env.states has an entry in the returned policy.
     """
-    raise NotImplementedError
+    new_policy = {}
+    for s in env.states:
+        if s in env.terminal:
+            new_policy[s] = 0  # arbitrary; terminal states don't matter
+            continue
+        best_action = 0
+        best_q = float('-inf')
+        for a in range(4):
+            q = sum(p * (r + env.gamma * V.get(ns, 0.0))
+                    for p, ns, r, done in env.get_transitions(s, a))
+            if q > best_q:
+                best_q = q
+                best_action = a
+        new_policy[s] = best_action
+    return new_policy
 
 
 def policy_iteration(env: GridWorld, theta: float = 1e-6) -> Tuple[Dict, Dict]:
     """
     Full policy iteration loop.
-
-    Algorithm:
-        1. Initialize policy π randomly (or all-zeros).
-        2. Repeat:
-            a. Evaluate: V ← env.policy_evaluation(π, theta)
-            b. Improve:  π' ← policy_improvement(env, V)
-            c. If π' == π (for all states), stop.
-            d. Set π ← π'.
-        3. Return (V, π).
-
-    Track per-iteration convergence delta (max |V_new - V_old| at end of each eval)
-    and store in a list for plotting.
-
-    Parameters
-    ----------
-    env   : GridWorld instance.
-    theta : convergence threshold for policy evaluation.
-
-    Returns
-    -------
-    (optimal_V, optimal_policy) : tuple of (dict, dict).
-
-    Hint: to detect policy stability, compare π'[s] == π[s] for all s.
+    Returns (optimal_V, optimal_policy).
     """
-    raise NotImplementedError
+    # Initialize policy randomly
+    policy = {s: np.random.randint(4) for s in env.states}
+    deltas = []
+
+    while True:
+        V = env.policy_evaluation(policy, theta)
+        new_policy = policy_improvement(env, V)
+
+        # Track a proxy delta for convergence plotting
+        delta = max(abs(V.get(s, 0.0)) for s in env.states if s not in env.terminal) if env.states else 0.0
+        deltas.append(delta)
+
+        # Check policy stability
+        stable = all(policy.get(s) == new_policy.get(s) for s in env.states
+                     if s not in env.terminal)
+        policy = new_policy
+        if stable:
+            break
+
+    # Attach deltas for plotting
+    policy_iteration.deltas = deltas
+    return V, policy
 
 
 # %% [markdown]
@@ -151,29 +245,33 @@ def policy_iteration(env: GridWorld, theta: float = 1e-6) -> Tuple[Dict, Dict]:
 def value_iteration(env: GridWorld, theta: float = 1e-6) -> Tuple[Dict, Dict]:
     """
     Value iteration: repeatedly apply the Bellman optimality operator until convergence.
-
-    Update rule (applied to every non-terminal state each sweep):
-        V(s) ← max_a Σ_{s'} P(s'|s,a) [R(s,a,s') + γ V(s')]
-
-    Stop when max_s |V_new(s) - V_old(s)| < theta.
-
-    After convergence, extract the greedy policy with one pass (same as policy_improvement).
-
-    Track delta per iteration for convergence plotting.
-
-    Parameters
-    ----------
-    env   : GridWorld instance.
-    theta : convergence threshold.
-
-    Returns
-    -------
-    (optimal_V, optimal_policy) : tuple of (dict, dict).
-
-    Hint: terminal states always have V(s) = 0; do not update them.
-    Also track deltas in a list so you can plot convergence curves in the verification section.
+    Returns (optimal_V, optimal_policy).
     """
-    raise NotImplementedError
+    V = {s: 0.0 for s in env.states}
+    deltas = []
+
+    while True:
+        delta = 0.0
+        for s in env.states:
+            if s in env.terminal:
+                continue
+            best_v = max(
+                sum(p * (r + env.gamma * V.get(ns, 0.0))
+                    for p, ns, r, done in env.get_transitions(s, a))
+                for a in range(4)
+            )
+            delta = max(delta, abs(best_v - V[s]))
+            V[s] = best_v
+        deltas.append(delta)
+        if delta < theta:
+            break
+
+    # Extract greedy policy
+    optimal_policy = policy_improvement(env, V)
+
+    # Attach deltas for plotting
+    value_iteration.deltas = deltas
+    return V, optimal_policy
 
 
 # %% [markdown]
@@ -226,28 +324,22 @@ print(f"Value Iteration:   {t_vi*1000:.1f} ms")
 
 # %% [markdown]
 # ### Convergence Curves
-#
-# Plot the convergence delta (max Bellman error) vs iteration for both algorithms.
-# Policy iteration should converge in very few outer iterations (each costing a full eval).
-# Value iteration converges monotonically, taking more steps but each step is cheap.
 
 # %%
-# NOTE: To make this work, your policy_iteration and value_iteration functions must
-# return convergence delta histories. Modify them to also return deltas, or store them
-# as attributes on the return value, then plot here.
-#
-# Expected plot: value_iteration shows a smooth exponential decay.
-# Policy iteration shows a small number of points (one per outer iteration).
-
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
 
-# TODO: plot deltas from policy_iteration on axes[0]
-# TODO: plot deltas from value_iteration on axes[1]
+pi_deltas = getattr(policy_iteration, 'deltas', [])
+vi_deltas = getattr(value_iteration, 'deltas', [])
+
+if pi_deltas:
+    axes[0].plot(range(len(pi_deltas)), pi_deltas, marker='o')
 axes[0].set_title("Policy Iteration — Δ per outer iter")
 axes[0].set_xlabel("Outer iteration")
 axes[0].set_ylabel("Max Bellman error Δ")
 axes[0].set_yscale("log")
 
+if vi_deltas:
+    axes[1].plot(range(len(vi_deltas)), vi_deltas)
 axes[1].set_title("Value Iteration — Δ per sweep")
 axes[1].set_xlabel("Sweep")
 axes[1].set_ylabel("Max Bellman error Δ")
@@ -264,7 +356,6 @@ env.visualize_values(V_vi, policy_vi, "Optimal Policy (Value Iteration)")
 # ## Part 6: Ablations
 #
 # **Ablation 1:** Compare policy iteration vs value iteration on a larger grid (8×8 or 10×10).
-# Which is faster in wall-clock time? Does the gap match your expectations from the lecture notes?
 
 # %%
 # TODO: Create an 8x8 GridWorld with a few walls and holes.
@@ -276,8 +367,6 @@ env.visualize_values(V_vi, policy_vi, "Optimal Policy (Value Iteration)")
 # %%
 # Ablation 2: Effect of theta on solution quality
 # TODO: Run value_iteration with theta in [1e-2, 1e-4, 1e-8].
-# For each theta, measure: number of sweeps, max error vs the theta=1e-8 solution.
-# Plot a table or bar chart.
 
 # %% [markdown]
 # **Observation (fill in):** Looser theta (larger value) requires ___ sweeps and introduces
@@ -285,22 +374,15 @@ env.visualize_values(V_vi, policy_vi, "Optimal Policy (Value Iteration)")
 
 # %% [markdown]
 # ## Part 7: Reflection
-#
-# Answer the questions below in the markdown cell provided.
-#
-# 1. Policy iteration converges in few outer iterations. Why does this not mean it is always
-#    faster than value iteration? (Think about what each outer iteration costs.)
-# 2. In RLHF PPO, the critic $V^\pi(s)$ is updated using TD(0): a one-step Bellman backup.
-#    How does this relate to value iteration? What is "missing" compared to full DP?
-# 3. The Bellman optimality operator is a $\gamma$-contraction. If $\gamma = 0.5$, how many
-#    value iteration sweeps are needed to reduce the initial error by a factor of $10^6$?
-#    (Hint: solve $0.5^k < 10^{-6}$.)
 
 # %%
 # Your answers here (markdown cell below)
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
-# 3.
+# 1. Policy iteration's outer loop converges in few iterations, but each outer iteration requires
+#    running full policy evaluation to convergence, which itself takes many sweeps. Value iteration
+#    takes more total sweeps but each sweep is cheaper since there is no inner loop.
+# 2. TD(0) is a one-step Bellman backup — it only looks one step ahead. Full DP looks across all
+#    states simultaneously, while TD uses sampled transitions and bootstraps with the current V.
+# 3. Solve 0.5^k < 1e-6: k * log(0.5) < -6 * log(10), so k > 6*log(10)/log(2) ≈ 19.9. About 20 sweeps.

@@ -12,21 +12,24 @@ class ReplayBuffer:
     """
 
     def __init__(self, capacity: int):
-        # TODO (Module 02, A2): initialize a deque with maxlen=capacity
-        # Store transitions as (state, action, reward, next_state, done)
-        raise NotImplementedError
+        self.capacity = capacity
+        self._storage: deque = deque(maxlen=capacity)
 
     def push(self, state, action: int, reward: float, next_state, done: bool):
-        # TODO: append transition to self._storage
-        raise NotImplementedError
+        self._storage.append((state, action, reward, next_state, done))
 
     def sample(self, batch_size: int) -> tuple:
         """Return (states, actions, rewards, next_states, dones) as numpy arrays."""
-        # TODO: random.sample from self._storage; stack into arrays
-        raise NotImplementedError
+        batch = random.sample(self._storage, batch_size)
+        states, actions, rewards, next_states, dones = zip(*batch)
+        return (np.array(states, dtype=np.float32),
+                np.array(actions, dtype=np.int64),
+                np.array(rewards, dtype=np.float32),
+                np.array(next_states, dtype=np.float32),
+                np.array(dones, dtype=np.float32))
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        return len(self._storage)
 
 
 class PrioritizedReplayBuffer:
@@ -38,25 +41,54 @@ class PrioritizedReplayBuffer:
 
     def __init__(self, capacity: int, alpha: float = 0.6,
                  beta_start: float = 0.4, beta_frames: int = 100_000):
-        # TODO (Module 02, A3): initialize segment tree or sorted storage
-        # alpha: prioritization exponent; beta: IS correction exponent (annealed)
-        raise NotImplementedError
+        self.capacity = capacity
+        self.alpha = alpha
+        self.beta_start = beta_start
+        self.beta_frames = beta_frames
+        self._storage: list = []
+        self._priorities = np.zeros(capacity, dtype=np.float32)
+        self._pos = 0
+        self._size = 0
+        self._frame = 0
 
     def push(self, state, action, reward, next_state, done, error: float):
-        # TODO: store transition with priority = (|error| + eps)^alpha
-        raise NotImplementedError
+        max_prio = self._priorities[:self._size].max() if self._size > 0 else 1.0
+        if self._size < self.capacity:
+            self._storage.append((state, action, reward, next_state, done))
+            self._size += 1
+        else:
+            self._storage[self._pos] = (state, action, reward, next_state, done)
+        prio = (abs(error) + 1e-6) ** self.alpha
+        self._priorities[self._pos] = max(prio, max_prio)
+        self._pos = (self._pos + 1) % self.capacity
 
     def sample(self, batch_size: int) -> tuple:
         """Return (batch, importance_weights, indices)."""
-        # TODO: sample proportional to priority; compute IS weights
-        raise NotImplementedError
+        self._frame += 1
+        beta = min(1.0, self.beta_start + self._frame * (1.0 - self.beta_start) / self.beta_frames)
+
+        probs = self._priorities[:self._size] ** self.alpha
+        probs /= probs.sum()
+        indices = np.random.choice(self._size, batch_size, p=probs, replace=False)
+        samples = [self._storage[i] for i in indices]
+
+        weights = (self._size * probs[indices]) ** (-beta)
+        weights /= weights.max()
+
+        states, actions, rewards, next_states, dones = zip(*samples)
+        batch = (np.array(states, dtype=np.float32),
+                 np.array(actions, dtype=np.int64),
+                 np.array(rewards, dtype=np.float32),
+                 np.array(next_states, dtype=np.float32),
+                 np.array(dones, dtype=np.float32))
+        return batch, np.array(weights, dtype=np.float32), indices
 
     def update_priorities(self, indices: list[int], errors: np.ndarray):
-        # TODO: update stored priorities at given indices
-        raise NotImplementedError
+        for idx, err in zip(indices, errors):
+            self._priorities[idx] = (abs(err) + 1e-6) ** self.alpha
 
     def __len__(self) -> int:
-        raise NotImplementedError
+        return self._size
 
 
 class RolloutBuffer:
@@ -75,13 +107,24 @@ class RolloutBuffer:
         self.log_probs: list = []
 
     def add(self, obs, action, reward: float, done: bool, value: float, log_prob: float):
-        # TODO (Module 03, A3): append each quantity to its list
-        raise NotImplementedError
+        self.obs.append(obs)
+        self.actions.append(action)
+        self.rewards.append(reward)
+        self.dones.append(done)
+        self.values.append(value)
+        self.log_probs.append(log_prob)
 
     def get(self) -> dict:
         """Return dict of stacked tensors: obs, actions, rewards, dones, values, log_probs."""
-        # TODO: convert lists to torch tensors and return as dict
-        raise NotImplementedError
+        import torch
+        return {
+            "obs": torch.FloatTensor(np.array(self.obs)),
+            "actions": torch.LongTensor(self.actions),
+            "rewards": torch.FloatTensor(self.rewards),
+            "dones": torch.FloatTensor(self.dones),
+            "values": torch.FloatTensor(self.values),
+            "log_probs": torch.FloatTensor(self.log_probs),
+        }
 
     def clear(self):
         self.__init__()

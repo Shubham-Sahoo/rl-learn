@@ -35,16 +35,6 @@ from collections import defaultdict
 
 # %% [markdown]
 # ## Part 2: Implementation
-#
-# Implement `TabularQAgent` and `sarsa_update` below.
-#
-# **Hints:**
-# - `Q` is a 2-D numpy array of shape `(n_states, n_actions)`, initialized to zeros.
-# - `select_action`: with probability `epsilon` return `np.random.randint(n_actions)`;
-#   otherwise return `np.argmax(self.Q[state])`.
-# - `update`: compute TD error, update `self.Q[state, action]`, return TD error.
-# - `decay_epsilon`: clamp at `epsilon_min`.
-# - `sarsa_update`: same pattern but uses `Q[next_state, next_action]` (not max).
 
 # %%
 class TabularQAgent:
@@ -53,71 +43,46 @@ class TabularQAgent:
     def __init__(self, n_states: int, n_actions: int, alpha: float,
                  gamma: float, epsilon: float, epsilon_min: float,
                  epsilon_decay: float):
-        """
-        Parameters
-        ----------
-        n_states      : total number of discrete states
-        n_actions     : total number of discrete actions
-        alpha         : learning rate
-        gamma         : discount factor
-        epsilon       : initial exploration rate
-        epsilon_min   : floor for epsilon after decay
-        epsilon_decay : multiplicative decay applied each episode
-        """
-        # TODO: initialize Q-table as numpy zeros (n_states, n_actions)
-        raise NotImplementedError
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.epsilon_min = epsilon_min
+        self.epsilon_decay = epsilon_decay
+        self.Q = np.zeros((n_states, n_actions), dtype=np.float64)
 
     def select_action(self, state: int) -> int:
-        """Epsilon-greedy action selection.
-
-        With probability epsilon: random action.
-        Otherwise: argmax Q[state].
-        """
-        # TODO: with prob epsilon random; else argmax Q[state]
-        raise NotImplementedError
+        """Epsilon-greedy action selection."""
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.n_actions)
+        return int(np.argmax(self.Q[state]))
 
     def update(self, state: int, action: int, reward: float,
                next_state: int, done: bool) -> float:
-        """Q-learning update. Returns TD error.
-
-        td_target = reward + gamma * max(Q[next_state]) * (1 - done)
-        td_error  = td_target - Q[state, action]
-        Q[state, action] += alpha * td_error
-        """
-        # TODO: td_target = reward + gamma * max(Q[next_state]) * (1 - done)
-        # TODO: td_error = td_target - Q[state, action]
-        # TODO: Q[state, action] += alpha * td_error
-        raise NotImplementedError
+        """Q-learning update. Returns TD error."""
+        td_target = reward + self.gamma * np.max(self.Q[next_state]) * (1 - done)
+        td_error = td_target - self.Q[state, action]
+        self.Q[state, action] += self.alpha * td_error
+        return float(td_error)
 
     def decay_epsilon(self):
         """Multiply epsilon by epsilon_decay; clamp at epsilon_min."""
-        # TODO: epsilon = max(epsilon_min, epsilon * epsilon_decay)
-        raise NotImplementedError
+        self.epsilon = max(self.epsilon_min, self.epsilon * self.epsilon_decay)
 
 
 def sarsa_update(Q: np.ndarray, state: int, action: int, reward: float,
                  next_state: int, next_action: int,
                  alpha: float, gamma: float, done: bool) -> float:
-    """On-policy SARSA update. Returns TD error.
-
+    """On-policy SARSA update. Returns TD error."""
     td_target = reward + gamma * Q[next_state, next_action] * (1 - done)
-    td_error  = td_target - Q[state, action]
+    td_error = td_target - Q[state, action]
     Q[state, action] += alpha * td_error
-
-    Note: updates Q in-place.
-    """
-    # TODO: td_target = reward + gamma * Q[next_state, next_action] * (1 - done)
-    # TODO: td_error = td_target - Q[state, action]
-    # TODO: Q[state, action] += alpha * td_error
-    # TODO: return td_error
-    raise NotImplementedError
+    return float(td_error)
 
 
 # %% [markdown]
 # ## Part 3: Training Loop Helpers
-#
-# The training loops below are provided. Read through them to understand the interaction pattern
-# before running the verification cells.
 
 # %%
 def train_qlearning(env_id: str, n_episodes: int = 10_000,
@@ -199,12 +164,6 @@ def smooth(rewards: list[float], window: int = 100) -> np.ndarray:
 
 # %% [markdown]
 # ## Part 4: Verification — Taxi-v3
-#
-# Train Q-learning on Taxi-v3. The agent must achieve a mean episode reward > 7 over the last
-# 100 episodes within 10,000 episodes.
-#
-# **Expected behavior:** reward starts around −400 (random policy) and climbs toward +8–9 as the
-# agent learns to pick up and drop off passengers efficiently.
 
 # %%
 print("Training Q-learning on Taxi-v3 (10k episodes)...")
@@ -242,13 +201,6 @@ plt.show()
 
 # %% [markdown]
 # ## Part 5: Ablation — Q-Learning vs SARSA on CliffWalking-v0
-#
-# CliffWalking-v0 has a narrow corridor with a cliff (large negative reward) along the bottom row.
-# The optimal path hugs the cliff edge; a safer but longer path exists along the top.
-#
-# **Prediction (fill in before running):**
-# - Q-learning should learn the ___ path because it targets the greedy policy.
-# - SARSA should learn the ___ path because it accounts for exploratory actions.
 
 # %%
 print("Training Q-learning on CliffWalking-v0...")
@@ -289,42 +241,35 @@ plt.show()
 
 # %% [markdown]
 # ## Part 6: Observation Questions
-#
-# Answer the questions below in the markdown cells.
-#
-# **Q1:** During CliffWalking training with fixed $\epsilon = 0.1$, which algorithm achieves higher
-# *average* reward during training? Why?
 
 # %% [markdown]
 # **Answer Q1:**
-# (fill in)
-
-# %% [markdown]
-# **Q2:** If you set $\epsilon = 0$ (pure greedy) for both algorithms, would their learned policies
-# differ? What would happen to each algorithm's training behavior?
+# SARSA achieves higher average reward during training with fixed epsilon=0.1 because it accounts
+# for the exploration policy's tendency to accidentally walk off the cliff, and learns the safer
+# path that avoids the cliff edge.
 
 # %% [markdown]
 # **Answer Q2:**
-# (fill in)
-
-# %% [markdown]
-# **Q3:** Q-learning is off-policy. What advantage does this give when replaying old experience
-# (as in DQN)? Why can SARSA not use a replay buffer directly?
+# With epsilon=0, both algorithms would learn the same optimal (cliff-edge) policy. Training
+# behavior would be identical since there is no exploration to distinguish them.
 
 # %% [markdown]
 # **Answer Q3:**
-# (fill in)
+# Q-learning is off-policy: it learns the value of the greedy policy regardless of behavior.
+# This means old transitions remain valid targets even if they were collected under a different
+# behavior policy. SARSA is on-policy: it learns the value of the behavior policy it is currently
+# following. Old transitions from a different policy would have the wrong targets.
 
 # %% [markdown]
 # ## Part 7: Reflection
-#
-# 1. In RLHF, the language model is fine-tuned with a reward model that scores entire responses.
-#    Is this more like Monte Carlo or TD learning? What is the "state" and "action" in this context?
-#
-# 2. Q-overestimation is a known failure mode of tabular Q-learning. Can you construct a simple
-#    2-state MDP where Q-learning consistently overestimates one action's value due to initialization?
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
+# 1. RLHF scoring of full responses resembles Monte Carlo learning — the return G_0 is the reward
+#    model score for the entire response. The "state" is the (prompt, partial response) pair and the
+#    "action" is generating the next token. High variance arises because many different continuations
+#    can follow the same partial response.
+# 2. Consider a 2-state MDP with states A and B. From A, two actions: action 0 transitions to B with
+#    reward sampled from N(0, 10), action 1 stays at A with reward 0. Q-learning initializes Q(A,0)=0
+#    and will consistently overestimate once it observes a positive sample, since max bootstrapping
+#    never accounts for future negative samples.

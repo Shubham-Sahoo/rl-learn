@@ -78,8 +78,8 @@ def extract_object_mentions(text: str, object_vocabulary: Set[str]) -> List[str]
     Returns:
         List of mentioned objects (may contain duplicates)
     """
-    # TODO: Tokenize text, lowercase, return tokens that appear in object_vocabulary
-    raise NotImplementedError
+    words = re.findall(r'\b\w+\b', text.lower())
+    return [w for w in words if w in object_vocabulary]
 
 
 def compute_chair_score(generated_captions: List[str],
@@ -98,7 +98,34 @@ def compute_chair_score(generated_captions: List[str],
     Returns:
         dict with keys 'CHAIR_s' (float) and 'CHAIR_i' (float)
     """
-    raise NotImplementedError
+    if object_vocabulary is None:
+        object_vocabulary = set(obj for gt in ground_truth_objects for obj in gt)
+
+    total_sentences = 0
+    hallucinated_sentences = 0
+    total_mentions = 0
+    hallucinated_mentions = 0
+
+    for caption, gt_objects in zip(generated_captions, ground_truth_objects):
+        gt_set = set(gt_objects)
+        # CHAIR_s: split into sentences
+        sentences = re.split(r'[.!?]+', caption)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        for sent in sentences:
+            total_sentences += 1
+            mentions = extract_object_mentions(sent, object_vocabulary)
+            hallucinated = [m for m in mentions if m not in gt_set]
+            if hallucinated:
+                hallucinated_sentences += 1
+
+        # CHAIR_i: count all object mentions in the full caption
+        all_mentions = extract_object_mentions(caption, object_vocabulary)
+        total_mentions += len(all_mentions)
+        hallucinated_mentions += sum(1 for m in all_mentions if m not in gt_set)
+
+    chair_s = hallucinated_sentences / total_sentences if total_sentences > 0 else 0.0
+    chair_i = hallucinated_mentions / total_mentions if total_mentions > 0 else 0.0
+    return {"CHAIR_s": chair_s, "CHAIR_i": chair_i}
 
 # %% [markdown]
 # ### Verify CHAIR Implementation
@@ -161,8 +188,14 @@ class HallucinationRewardModel(nn.Module):
     def __init__(self, vision_dim: int = 768, text_dim: int = 768,
                  hidden_dim: int = 256):
         super().__init__()
-        # TODO: project vision + text → concat → MLP → scalar (sigmoid)
-        raise NotImplementedError
+        self.vision_proj = nn.Linear(vision_dim, hidden_dim)
+        self.text_proj = nn.Linear(text_dim, hidden_dim)
+        self.mlp = nn.Sequential(
+            nn.Linear(2 * hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+            nn.Sigmoid(),
+        )
 
     def forward(self, vision_features: torch.Tensor,
                 text_features: torch.Tensor) -> torch.Tensor:
@@ -175,7 +208,10 @@ class HallucinationRewardModel(nn.Module):
         Returns:
             faithfulness_score: Shape (batch,) with values in [0, 1]
         """
-        raise NotImplementedError
+        v = self.vision_proj(vision_features)   # (batch, hidden_dim)
+        t = self.text_proj(text_features)        # (batch, hidden_dim)
+        combined = torch.cat([v, t], dim=-1)     # (batch, 2 * hidden_dim)
+        return self.mlp(combined).squeeze(-1)    # (batch,)
 
 # %% [markdown]
 # ## Part 3: VLM DPO Loss
@@ -222,7 +258,22 @@ def dpo_vlm_loss(policy_vlm: HallucinationRewardModel,
     Returns:
         loss: Scalar DPO loss
     """
-    raise NotImplementedError
+    img = batch["image_features"]
+    winner_feat = batch["winner_features"]
+    loser_feat = batch["loser_features"]
+
+    # Policy log-probs (proxy): log(score) for winner and loser
+    log_pi_w = torch.log(policy_vlm(img, winner_feat).clamp(min=1e-6))
+    log_pi_l = torch.log(policy_vlm(img, loser_feat).clamp(min=1e-6))
+
+    # Reference log-probs (no gradient)
+    with torch.no_grad():
+        log_ref_w = torch.log(ref_vlm(img, winner_feat).clamp(min=1e-6))
+        log_ref_l = torch.log(ref_vlm(img, loser_feat).clamp(min=1e-6))
+
+    reward_diff = beta * ((log_pi_w - log_ref_w) - (log_pi_l - log_ref_l))
+    loss = -F.logsigmoid(reward_diff).mean()
+    return loss
 
 # %% [markdown]
 # ## Part 4: Training — Hallucination Reduction

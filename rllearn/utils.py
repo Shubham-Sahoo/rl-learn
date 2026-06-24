@@ -19,8 +19,12 @@ def compute_returns(rewards: list[float], gamma: float) -> list[float]:
     Implemented in: Module 03, Assignment 1.
     Used in: Module 03 A1.
     """
-    # TODO (Module 03, A1): work backwards; G_T = r_T, G_t = r_t + gamma * G_{t+1}
-    raise NotImplementedError
+    returns = []
+    G = 0.0
+    for r in reversed(rewards):
+        G = r + gamma * G
+        returns.insert(0, G)
+    return returns
 
 
 def compute_gae(rewards: list[float], values: list[float], dones: list[bool],
@@ -41,9 +45,15 @@ def compute_gae(rewards: list[float], values: list[float], dones: list[bool],
     Returns:
         advantages: Tensor of shape (T,)
     """
-    # TODO (Module 03, A2): iterate backwards; accumulate advantage
-    # Common mistake: forgetting to zero-out next advantage at episode boundaries (dones)
-    raise NotImplementedError
+    T = len(rewards)
+    advantages = np.zeros(T, dtype=np.float32)
+    last_gae = 0.0
+    for t in reversed(range(T)):
+        next_non_terminal = 1.0 - float(dones[t])
+        delta = rewards[t] + gamma * values[t + 1] * next_non_terminal - values[t]
+        last_gae = delta + gamma * lam * next_non_terminal * last_gae
+        advantages[t] = last_gae
+    return torch.FloatTensor(advantages)
 
 
 def explained_variance(y_pred: np.ndarray, y_true: np.ndarray) -> float:

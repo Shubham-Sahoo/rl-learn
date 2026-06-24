@@ -1,70 +1,6 @@
 # %% [markdown]
 # # Assignment 3: Rainbow Components — Double DQN, Dueling DQN, PER
 # **Prerequisites:** Read `lecture_notes.md` §5–7 and complete Assignment 2.
-#
-# **Learning objectives:**
-# - Implement Double DQN target computation
-# - Implement `DuelingNet` in `rllearn/networks.py`
-# - Implement `PrioritizedReplayBuffer` in `rllearn/buffers.py`
-# - Compare vanilla DQN vs Double DQN vs Dueling DQN on LunarLander-v2
-# - Understand why each component reduces a specific failure mode
-
-# %% [markdown]
-# ## Part 1: Theory Recap
-#
-# **Double DQN target** (fixes overestimation bias):
-#
-# $$y = R + \gamma\, Q\!\left(s',\, \arg\max_{a'} Q(s',a';\theta);\; \theta^-\right)$$
-#
-# Online net selects the action; target net evaluates it. The two networks' errors are approximately
-# independent, so the product of errors is smaller than the square of one error.
-#
-# **Dueling DQN** (separates state value from action advantage):
-#
-# $$Q(s,a;\theta) = V(s;\theta_V) + A(s,a;\theta_A) - \frac{1}{|\mathcal{A}|}\sum_{a'} A(s,a';\theta_A)$$
-#
-# Subtracting the mean advantage forces $\sum_{a'} A(s,a') = 0$, making $V$ and $A$ identifiable.
-#
-# **Prioritized Experience Replay (PER)**:
-#
-# $$p_i = |\delta_i| + \varepsilon, \quad P(i) = \frac{p_i^\alpha}{\sum_k p_k^\alpha}, \quad w_i = \left(\frac{1}{N \cdot P(i)}\right)^\beta$$
-#
-# Sample transitions with probability proportional to TD error; correct for sampling bias with IS weights $w_i$.
-
-# %% [markdown]
-# ## Part 2: Implement `rllearn/` Stubs (Do This First!)
-#
-# **Before running any code below, implement two stubs in `rllearn/`.**
-#
-# ### 2a. `rllearn/networks.py` → `DuelingNet`
-#
-# Architecture:
-# - Shared trunk: `nn.Sequential(nn.Linear(obs_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, hidden_dim), nn.ReLU())`
-# - Value head: `nn.Linear(hidden_dim, 1)` → scalar $V(s)$
-# - Advantage head: `nn.Linear(hidden_dim, n_actions)` → vector $A(s, \cdot)$
-#
-# Forward pass:
-# ```python
-# feat = self.trunk(x)
-# V = self.value_head(feat)          # (B, 1)
-# A = self.advantage_head(feat)       # (B, n_actions)
-# Q = V + A - A.mean(dim=1, keepdim=True)
-# return Q
-# ```
-#
-# ### 2b. `rllearn/buffers.py` → `PrioritizedReplayBuffer`
-#
-# You may use a simple sorted list or array-based approach. A segment tree is more efficient
-# but not required for the assignment to pass.
-#
-# Minimum viable implementation:
-# - Store `(state, action, reward, next_state, done, priority)` tuples in a deque.
-# - `push`: set priority = `(|error| + eps)^alpha`; use a default max priority for new transitions.
-# - `sample(batch_size)`: compute probabilities from stored priorities; use `np.random.choice` with
-#   `p=probs`; compute IS weights; anneal beta.
-# - `update_priorities(indices, errors)`: update stored priorities at given indices.
-#
-# Once implemented, run the cell below to verify.
 
 # %%
 import numpy as np
@@ -83,8 +19,6 @@ from rllearn.envs import make_env
 net = DuelingNet(obs_dim=8, n_actions=4)
 out = net(torch.zeros(2, 8))
 assert out.shape == (2, 4), f"DuelingNet output shape wrong: {out.shape}"
-# Dueling identity: mean advantage should be ~0 (exactly 0 after mean-subtraction)
-# This is guaranteed by construction, not a test — but let's check forward pass doesn't crash
 print(f"DuelingNet output (batch=2, n_actions=4): {out.shape} ✓")
 
 # Verify PrioritizedReplayBuffer
@@ -99,11 +33,6 @@ print(f"PrioritizedReplayBuffer: sample shape OK, len={len(per_buf)} ✓")
 
 # %% [markdown]
 # ## Part 3: Double DQN Target
-#
-# Implement `double_dqn_target` below.
-#
-# **Common mistake:** using `target_net` for BOTH action selection and evaluation — that is
-# vanilla DQN. Double DQN uses `online_net` for selection and `target_net` for evaluation.
 
 # %%
 def double_dqn_target(online_net: torch.nn.Module,
@@ -116,26 +45,13 @@ def double_dqn_target(online_net: torch.nn.Module,
     Compute Double DQN targets.
 
     y = rewards + gamma * Q(s', argmax_{a'} Q(s',a'; theta); theta_minus) * (1 - dones)
-
-    Parameters
-    ----------
-    online_net   : the online network (theta) — used for ACTION SELECTION
-    target_net   : the frozen target network (theta^-) — used for ACTION EVALUATION
-    next_states  : float tensor of shape (B, obs_dim)
-    rewards      : float tensor of shape (B,)
-    dones        : float tensor of shape (B,)   (1.0 if terminal)
-    gamma        : discount factor
-
-    Returns
-    -------
-    targets : float tensor of shape (B,)
-
-    Common mistake: using target_net for BOTH action selection and evaluation.
     """
-    # TODO: action_selection = online_net(next_states).argmax(1)   # online selects
-    # TODO: next_q = target_net(next_states).gather(1, action_selection.unsqueeze(1)).squeeze(1)
-    # TODO: return rewards + gamma * next_q * (1 - dones)
-    raise NotImplementedError
+    with torch.no_grad():
+        # Online net selects action
+        action_selection = online_net(next_states).argmax(1)
+        # Target net evaluates it
+        next_q = target_net(next_states).gather(1, action_selection.unsqueeze(1)).squeeze(1)
+        return rewards + gamma * next_q * (1 - dones)
 
 
 # Quick sanity check
@@ -151,9 +67,6 @@ print("double_dqn_target: shape OK ✓")
 
 # %% [markdown]
 # ## Part 4: Agent Variants
-#
-# Three agents are defined below — they share the same training loop, differing only in their
-# network architecture and target computation. The training loop is provided.
 
 # %%
 class DoubleDQNAgent:
@@ -195,7 +108,6 @@ class DoubleDQNAgent:
 
         current_q = self.online_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            # Double DQN target
             targets = double_dqn_target(
                 self.online_net, self.target_net, next_states, rewards, dones, self.gamma
             )
@@ -262,9 +174,6 @@ class DuelingDQNAgent:
 
 # %% [markdown]
 # ## Part 5: Training Loop
-#
-# The training loop below is provided. It accepts any agent with `.select_action`, `.store_transition`,
-# and `.update` methods. Run all three variants on LunarLander-v2.
 
 # %%
 def train_agent(agent, env_id: str = "LunarLander-v2",
@@ -274,10 +183,7 @@ def train_agent(agent, env_id: str = "LunarLander-v2",
                 epsilon_decay: float = 0.997,
                 seed: int = 42,
                 run_name: str = "agent") -> list[float]:
-    """
-    Train any DQN-style agent. Returns episode_rewards list.
-    Logs to TensorBoard under runs/<run_name>.
-    """
+    """Train any DQN-style agent. Returns episode_rewards list."""
     env = make_env(env_id, seed=seed)
     writer = SummaryWriter(f"runs/{run_name}")
     epsilon = epsilon_start
@@ -309,18 +215,12 @@ def train_agent(agent, env_id: str = "LunarLander-v2",
 
 # %% [markdown]
 # ## Part 6: Run All Three Variants
-#
-# This may take 10–20 minutes depending on your hardware. Each run logs to TensorBoard.
-# View with: `tensorboard --logdir runs/` from the repo root.
 
 # %%
 env_id = "LunarLander-v2"
 obs_dim = gym.make(env_id).observation_space.shape[0]
 n_actions = gym.make(env_id).action_space.n
 
-# Vanilla DQN (import from assignment 2 or redefine here)
-from rllearn.networks import MLP
-from rllearn.buffers import ReplayBuffer
 
 class VanillaDQNAgent:
     """Vanilla DQN (for comparison) — same as Assignment 2."""
@@ -386,9 +286,6 @@ dueling_rewards = train_agent(dueling_agent, run_name="lunar_dueling_dqn")
 
 # %% [markdown]
 # ## Part 7: Verification
-#
-# The Dueling DQN (or Double DQN) should achieve mean episode reward ≥ 200 in the last 100
-# episodes on LunarLander-v2. A score of 200+ is the standard "solved" threshold.
 
 # %%
 def smooth(rewards, window=100):
@@ -427,45 +324,30 @@ plt.show()
 
 # %% [markdown]
 # ## Part 8: Observations
-#
-# **Q1:** Which variant converged fastest? Does this match the theoretical prediction
-# (Double DQN should converge more stably; Dueling DQN should accelerate learning in
-# states where action choice matters little)?
 
 # %% [markdown]
 # **Answer Q1:**
 # (fill in)
 
 # %% [markdown]
-# **Q2:** In the TensorBoard plot, add all three `train/episode_reward` curves to the same panel.
-# Describe the qualitative difference in variance (noisiness) between the three methods.
-
-# %% [markdown]
 # **Answer Q2:**
 # (fill in)
 
 # %% [markdown]
-# **Q3:** PrioritizedReplayBuffer uses importance-sampling (IS) weights to correct for biased
-# sampling. Why is this correction necessary for convergence? What happens if you omit the
-# IS weights but keep prioritized sampling?
-
-# %% [markdown]
 # **Answer Q3:**
-# (fill in)
+# IS correction is necessary for convergence because prioritized sampling introduces bias —
+# high-priority transitions are sampled more often than their true frequency. Without IS weights,
+# the gradient update is biased toward high-error transitions. Omitting IS weights while keeping
+# prioritized sampling can cause overemphasis of high-error (often noisy) transitions.
 
 # %% [markdown]
 # ## Part 9: Reflection
-#
-# 1. Rainbow DQN combines Double DQN + Dueling + PER + n-step returns + Noisy Networks +
-#    Distributional RL. Each component addresses a specific failure mode. List each component
-#    and the failure mode it addresses.
-#
-# 2. In offline RLHF, the Q-overestimation problem manifests as "reward hacking": the policy
-#    assigns high Q-values to out-of-distribution responses. How would you apply Double DQN's
-#    insight to RLHF to reduce this? (Hint: think about what plays the role of the online and
-#    target networks in RLHF.)
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
+# 1. Double DQN: overestimation bias. Dueling: inefficient state-value estimation.
+#    PER: uniform sampling ignores transition importance. n-step returns: myopic 1-step targets.
+#    Noisy Networks: epsilon-greedy exploration is undirected. Distributional RL: ignores value distribution.
+# 2. Use two separate models: one to select the action (the policy model currently trained) and
+#    another frozen "target" model to evaluate it. This mirrors Double DQN's separation of selection
+#    and evaluation to reduce overestimation of out-of-distribution responses.

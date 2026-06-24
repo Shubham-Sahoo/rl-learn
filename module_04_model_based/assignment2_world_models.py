@@ -1,16 +1,5 @@
 # %% [markdown]
 # # Module 04, Assignment 2: Neural World Models
-#
-# ## Prerequisites
-# - Module 02 A2: ReplayBuffer (implement rllearn/buffers.py first)
-# - Module 02 A2: make_env (implement rllearn/envs.py first)
-# - Lecture notes sections 3–4
-#
-# ## Learning Objectives
-# 1. Build a learned transition model for CartPole
-# 2. Train it on offline data and evaluate one-step prediction MSE
-# 3. Generate synthetic rollouts to augment real experience
-# 4. Understand compounding error over multi-step rollouts
 
 # %%
 import torch
@@ -24,51 +13,7 @@ from typing import List, Tuple
 from rllearn.logging import make_writer
 
 # %% [markdown]
-# ## Part 1: Theory Recap
-#
-# ### Transition and Reward Models
-#
-# We learn two parameterized functions from replay data $\mathcal{D}$:
-#
-# $$f_\phi : (s_t, a_t) \mapsto \hat{s}_{t+1}$$
-#
-# $$g_\phi : (s_t, a_t) \mapsto \hat{r}_t$$
-#
-# **Transition loss:**
-#
-# $$\mathcal{L}_{\text{transition}}(\phi) = \mathbb{E}_{(s_t, a_t, s_{t+1}) \sim \mathcal{D}}\!\left[\|f_\phi(s_t, a_t) - s_{t+1}\|^2\right]$$
-#
-# **Reward loss:**
-#
-# $$\mathcal{L}_{\text{reward}}(\phi) = \mathbb{E}_{(s_t, a_t, r_t) \sim \mathcal{D}}\!\left[(g_\phi(s_t, a_t) - r_t)^2\right]$$
-#
-# ### Compounding Error
-#
-# At horizon $H$, error accumulates because each predicted $\hat{s}_{t+1}$ feeds back as input:
-#
-# $$\hat{s}_{t+H} = f_\phi(\ldots f_\phi(f_\phi(s_t, a_t), a_{t+1}) \ldots, a_{t+H-1})$$
-#
-# Even a small one-step MSE $\epsilon$ compounds: errors at step $t$ are inputs to step $t+1$, and
-# because $f_\phi$ is nonlinear, small perturbations can amplify. In practice, MSE at horizon $H$
-# grows super-linearly with $H$ for chaotic environments.
-
-# %% [markdown]
 # ## Part 2: Implement TransitionModel and RewardModel
-#
-# Fill in every `raise NotImplementedError`. Do not change method signatures.
-#
-# **TransitionModel:** MLP with architecture `obs_dim + action_dim → hidden_dim → ReLU → hidden_dim → ReLU → obs_dim`.
-# The input is the concatenation of `obs` and a one-hot encoded action.
-#
-# **RewardModel:** Same architecture but output is a scalar (shape `(batch, 1)`).
-#
-# **train_world_model:** Sample a batch from `replay_buffer.sample(batch_size)`, compute both
-# losses, sum them, and take one gradient step. Return `(transition_loss.item(), reward_loss.item())`.
-#
-# **generate_model_rollout:** Starting from `start_obs`, roll out the transition model for
-# `horizon` steps. At each step call `policy(obs)` to get an action, then use the transition and
-# reward models to predict `next_obs` and `reward`. Return a list of
-# `(obs, action, reward, next_obs)` tuples.
 
 # %%
 class TransitionModel(nn.Module):
@@ -76,12 +21,18 @@ class TransitionModel(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # TODO: MLP(obs_dim + action_dim, obs_dim)
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, obs_dim),
+        )
 
     def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Return predicted next_obs of same shape as obs."""
-        raise NotImplementedError
+        x = torch.cat([obs, action], dim=-1)
+        return self.net(x)
 
 
 class RewardModel(nn.Module):
@@ -89,11 +40,18 @@ class RewardModel(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim + action_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Return predicted reward of shape (batch, 1)."""
-        raise NotImplementedError
+        x = torch.cat([obs, action], dim=-1)
+        return self.net(x)
 
 
 def train_world_model(transition_model: TransitionModel,
@@ -102,7 +60,26 @@ def train_world_model(transition_model: TransitionModel,
                       replay_buffer,
                       batch_size: int = 256) -> Tuple[float, float]:
     """Train one gradient step on world model. Returns (transition_loss, reward_loss)."""
-    raise NotImplementedError
+    obs_b, action_b, reward_b, next_obs_b = replay_buffer.sample(batch_size)
+
+    # One-hot encode actions
+    n_actions = transition_model.net[0].in_features - obs_b.shape[1]
+    action_oh = F.one_hot(action_b, num_classes=n_actions).float()
+
+    # Transition loss
+    pred_next_obs = transition_model(obs_b, action_oh)
+    transition_loss = F.mse_loss(pred_next_obs, next_obs_b)
+
+    # Reward loss
+    pred_reward = reward_model(obs_b, action_oh)
+    reward_loss = F.mse_loss(pred_reward, reward_b)
+
+    total_loss = transition_loss + reward_loss
+    optimizer.zero_grad()
+    total_loss.backward()
+    optimizer.step()
+
+    return transition_loss.item(), reward_loss.item()
 
 
 def generate_model_rollout(transition_model: TransitionModel,
@@ -110,38 +87,42 @@ def generate_model_rollout(transition_model: TransitionModel,
                            start_obs: torch.Tensor,
                            policy,
                            horizon: int = 5) -> List[Tuple]:
-    """Generate synthetic (obs, action, reward, next_obs) transitions using learned model.
+    """Generate synthetic (obs, action, reward, next_obs) transitions using learned model."""
+    n_actions = transition_model.net[0].in_features - start_obs.shape[0]
+    rollout = []
+    obs = start_obs.unsqueeze(0)  # (1, obs_dim)
 
-    Parameters
-    ----------
-    transition_model : learned f_phi
-    reward_model     : learned g_phi
-    start_obs        : initial observation tensor of shape (obs_dim,)
-    policy           : callable obs_tensor -> action_int
-    horizon          : number of steps to roll out
+    transition_model.eval()
+    reward_model.eval()
 
-    Returns
-    -------
-    List of (obs, action, reward, next_obs) tuples as numpy arrays / floats.
-    """
-    raise NotImplementedError
+    with torch.no_grad():
+        for _ in range(horizon):
+            action_int = policy(obs.squeeze(0))
+            action_t = torch.LongTensor([action_int])
+            action_oh = F.one_hot(action_t, num_classes=n_actions).float()
+
+            next_obs = transition_model(obs, action_oh)
+            reward = reward_model(obs, action_oh).squeeze().item()
+
+            rollout.append((
+                obs.squeeze(0).numpy(),
+                action_int,
+                reward,
+                next_obs.squeeze(0).numpy(),
+            ))
+            obs = next_obs
+
+    return rollout
 
 
 # %% [markdown]
 # ## Part 3: Collect Offline Data and Train
-#
-# The data collection and training loop below are provided. Read through before running.
 
 # %%
 def collect_offline_data(env_id: str = "CartPole-v1",
                          n_transitions: int = 5000,
                          seed: int = 42) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Collect transitions using a random policy.
-
-    Returns
-    -------
-    obs, actions, rewards, next_obs — each a numpy array with n_transitions rows.
-    """
+    """Collect transitions using a random policy."""
     np.random.seed(seed)
     env = gym.make(env_id)
 
@@ -170,7 +151,7 @@ def collect_offline_data(env_id: str = "CartPole-v1",
 
 
 class SimpleReplayBuffer:
-    """Minimal replay buffer for world model training (no rllearn dependency)."""
+    """Minimal replay buffer for world model training."""
 
     def __init__(self, obs: np.ndarray, actions: np.ndarray,
                  rewards: np.ndarray, next_obs: np.ndarray):
@@ -190,7 +171,6 @@ print("Collecting 5000 offline transitions from CartPole-v1 ...")
 obs_data, action_data, reward_data, next_obs_data = collect_offline_data(
     n_transitions=5000, seed=42)
 
-# 80/20 train/eval split
 split = int(0.8 * len(obs_data))
 train_buf = SimpleReplayBuffer(obs_data[:split], action_data[:split],
                                reward_data[:split], next_obs_data[:split])
@@ -234,13 +214,6 @@ writer.close()
 print("Training complete.")
 
 # %% [markdown]
-# ### TensorBoard (optional — run before training)
-
-# %%
-# %load_ext tensorboard
-# %tensorboard --logdir runs/
-
-# %% [markdown]
 # ### Verification: One-Step Prediction MSE < 0.01
 
 # %%
@@ -264,9 +237,6 @@ print("Verification passed: one-step MSE < 0.01")
 
 # %% [markdown]
 # ## Part 4: Ablation — Compounding Error over Multi-Step Horizons
-#
-# Roll out the transition model from held-out starting observations for horizons h ∈ {1, 5, 10, 20}.
-# Measure MSE between model predictions and ground-truth observations from real rollouts.
 
 # %%
 def compute_rollout_mse(transition_model: TransitionModel,
@@ -274,10 +244,7 @@ def compute_rollout_mse(transition_model: TransitionModel,
                         n_rollouts: int = 100,
                         max_horizon: int = 20,
                         seed: int = 42) -> dict:
-    """Roll out both model and real env from the same start state; compare at each horizon.
-
-    Returns dict horizon -> mean MSE over n_rollouts.
-    """
+    """Roll out both model and real env from the same start state; compare at each horizon."""
     env = gym.make(env_id)
     transition_model.eval()
     mse_by_horizon: dict = {h: [] for h in range(1, max_horizon + 1)}
@@ -331,41 +298,10 @@ for h in [1, 5, 10, 20]:
         print(f"Horizon {h:2d}: MSE = {horizon_mse[h]:.5f}")
 
 # %% [markdown]
-# ### Observations
-#
-# 1. **One-step MSE is low** (< 0.01 from verification). The model learned the CartPole dynamics well.
-#
-# 2. **MSE grows with horizon** due to compounding: the error at step $h$ feeds into the model's
-#    input at step $h+1$, and the distribution shift from the training data accumulates.
-#
-# 3. **When is the model trustworthy?** Look at the elbow in the curve. Beyond the elbow, model
-#    predictions are unreliable and planning with them will mislead the policy.
-#
-# *(Replace with your own observations after running.)*
-
-# %% [markdown]
-# ## Part 5: Reflection
-#
-# **Q1 — Why does error compound? How does RSSM mitigate this?**
-# Each step feeds the model's prediction as its next input. Errors accumulate because $f_\phi$
-# is not trained on its own predictions — only on real transitions. RSSM mitigates this with
-# (a) a stochastic latent $z_t$ that can represent uncertainty over future states, and (b) a KL
-# penalty that keeps the prior (used during imagination) close to the posterior (used with real obs),
-# ensuring imagined rollouts remain in-distribution.
-#
-# **Q2 — When would you trust model rollouts vs. real experience?**
-# Trust the model when: rollout horizon is short (h ≤ 5), the start state is within the training
-# distribution, and ensemble disagreement (if available) is low. Use real experience when: the
-# model is newly initialized, you are in a novel state (exploration), or the environment has
-# contact-rich/discontinuous dynamics that are hard to fit.
-#
-# **Q3 — Design question:**
-# Suppose you have a 5000-step real dataset (as above) and unlimited model compute. What would
-# you change to maximize the policy's real-world performance? Consider: rollout horizon, model
-# ensemble, data augmentation, and when to collect more real data.
-
-# %% [markdown]
 # **Answers:**
-# 1.
-# 2.
-# 3.
+# 1. Error compounds because each step uses predicted obs as input. RSSM uses stochastic latents
+#    and a KL penalty to keep imagined rollouts near the training distribution.
+# 2. Trust model when horizon is short (h <= 5), state is in-distribution, ensemble disagreement
+#    is low. Use real experience for novel states or contact-rich dynamics.
+# 3. Use short horizons (1-3 steps), train a model ensemble, collect more real data when ensemble
+#    disagreement is high (MBPO-style), use data augmentation with model rollouts.

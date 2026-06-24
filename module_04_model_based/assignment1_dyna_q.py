@@ -1,15 +1,5 @@
 # %% [markdown]
 # # Module 04, Assignment 1: Dyna-Q
-#
-# ## Prerequisites
-# - Module 01 A1: GridWorld environment
-# - Lecture notes sections 1–2
-#
-# ## Learning Objectives
-# 1. Understand how model-based planning augments model-free RL
-# 2. Implement the Dyna-Q tabular model
-# 3. Observe the sample efficiency gains from planning steps
-# 4. Understand model exploitation and when it matters
 
 # %%
 import numpy as np
@@ -21,89 +11,60 @@ from typing import Dict, List, Tuple
 from rllearn.logging import make_writer
 
 # %% [markdown]
-# ## Part 1: Theory Recap
-#
-# ### Dyna-Q Core Equations
-#
-# **Direct RL update (from real experience):**
-#
-# $$Q(s, a) \leftarrow Q(s, a) + \alpha \bigl[r + \gamma \max_{a'} Q(s', a') - Q(s, a)\bigr]$$
-#
-# **Model update:**
-#
-# $$\mathcal{M}(s, a) \leftarrow (r, s') \quad \text{(deterministic tabular model)}$$
-#
-# **Planning update (from model):**
-#
-# $$\tilde{s}, \tilde{a} \sim \text{Uniform}(\mathcal{M}\text{.keys()})$$
-#
-# $$\tilde{r}, \tilde{s}' = \mathcal{M}(\tilde{s}, \tilde{a})$$
-#
-# $$Q(\tilde{s}, \tilde{a}) \leftarrow Q(\tilde{s}, \tilde{a}) + \alpha \bigl[\tilde{r} + \gamma \max_{a'} Q(\tilde{s}', a') - Q(\tilde{s}, \tilde{a})\bigr]$$
-#
-# The full Dyna-Q step for each real transition is: **direct update → model update → n planning updates**.
-#
-# **Intuition:** Each real step costs one environment interaction. Each planning step costs a dictionary
-# lookup. With `n_planning_steps=50`, the agent extracts 51× the information from each real step,
-# propagating value updates through 50 previously-seen transitions.
-
-# %% [markdown]
 # ## Part 2: Implement DynaQAgent
-#
-# Fill in every `raise NotImplementedError` below. Do not change any method signatures.
-#
-# **Implementation notes:**
-# - `self.Q` is a 2D numpy array of shape `(n_states, n_actions)`, initialized to zeros.
-# - `self.model` is a plain Python dict mapping `(state, action) -> (reward, next_state)`.
-# - `select_action` uses ε-greedy: with probability `epsilon` pick a random action,
-#   otherwise pick `argmax Q(state, :)`.
-# - `update_q` performs a single Bellman update and returns the TD error (scalar float).
-# - `plan` runs `self.n_planning_steps` synthetic Q-updates; each iteration samples a random
-#   `(s, a)` pair from `self.model.keys()` (use `random.choice(list(...))`).
-# - `step` calls `update_q`, `update_model`, then `plan` in that order.
 
 # %%
 class DynaQAgent:
     def __init__(self, n_states: int, n_actions: int, alpha: float = 0.1,
                  gamma: float = 0.99, epsilon: float = 0.1,
                  n_planning_steps: int = 10):
-        # TODO: Q-table zeros; model = {} (dict mapping (s,a) -> (r, s'))
-        raise NotImplementedError
+        self.n_states = n_states
+        self.n_actions = n_actions
+        self.alpha = alpha
+        self.gamma = gamma
+        self.epsilon = epsilon
+        self.n_planning_steps = n_planning_steps
+        self.Q = np.zeros((n_states, n_actions), dtype=np.float64)
+        self.model: Dict[Tuple[int, int], Tuple[float, int]] = {}
 
     def select_action(self, state: int) -> int:
-        # TODO: epsilon-greedy
-        raise NotImplementedError
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.n_actions)
+        return int(np.argmax(self.Q[state]))
 
     def update_q(self, state: int, action: int, reward: float, next_state: int) -> float:
         """Direct RL update from real experience. Returns TD error."""
-        raise NotImplementedError
+        td_target = reward + self.gamma * np.max(self.Q[next_state])
+        td_error = td_target - self.Q[state, action]
+        self.Q[state, action] += self.alpha * td_error
+        return float(td_error)
 
     def update_model(self, state: int, action: int, reward: float, next_state: int):
         """Store observed transition in model."""
-        # TODO: self.model[(state, action)] = (reward, next_state)
-        raise NotImplementedError
+        self.model[(state, action)] = (reward, next_state)
 
     def plan(self):
         """Run n_planning_steps synthetic Q-updates from model."""
-        # TODO: for _ in range(n_planning_steps):
-        #   sample random (s,a) from self.model.keys()
-        #   r, s' = self.model[(s,a)]
-        #   Q-update using r, s'
-        raise NotImplementedError
+        if not self.model:
+            return
+        keys = list(self.model.keys())
+        for _ in range(self.n_planning_steps):
+            s, a = random.choice(keys)
+            r, ns = self.model[(s, a)]
+            td_target = r + self.gamma * np.max(self.Q[ns])
+            td_error = td_target - self.Q[s, a]
+            self.Q[s, a] += self.alpha * td_error
 
     def step(self, state: int, action: int, reward: float,
              next_state: int, done: bool):
         """Full Dyna-Q step: update_q + update_model + plan."""
-        raise NotImplementedError
+        self.update_q(state, action, reward, next_state)
+        self.update_model(state, action, reward, next_state)
+        self.plan()
 
 
 # %% [markdown]
 # ## Part 3: Training Loop
-#
-# We use FrozenLake-v1 with `is_slippery=False` — a deterministic 4×4 gridworld where the agent
-# must navigate from start (top-left) to goal (bottom-right) avoiding holes.
-#
-# The training loop below is provided. Read through it before running.
 
 # %%
 def make_frozen_lake():
@@ -118,13 +79,7 @@ def train_dyna_q(n_planning_steps: int = 10,
                  epsilon: float = 0.1,
                  seed: int = 42,
                  log_tensorboard: bool = False) -> Tuple[List[float], List[int]]:
-    """Train Dyna-Q on FrozenLake-v1 (deterministic).
-
-    Returns
-    -------
-    episode_rewards : list of episode total reward (0.0 or 1.0 on FrozenLake)
-    real_steps      : cumulative real environment steps at end of each episode
-    """
+    """Train Dyna-Q on FrozenLake-v1 (deterministic)."""
     np.random.seed(seed)
     random.seed(seed)
 
@@ -180,23 +135,12 @@ def train_dyna_q(n_planning_steps: int = 10,
 
 
 # %% [markdown]
-# ### TensorBoard (optional — run the cell below before training)
-
-# %%
-# %load_ext tensorboard
-# %tensorboard --logdir runs/
-
-# %% [markdown]
 # ### Verification
-#
-# With `n_planning_steps=50`, Dyna-Q should solve FrozenLake (reach the goal) within 50 real
-# environment steps. A "solve" is defined as the first episode that earns reward 1.0.
 
 # %%
 print("Training Dyna-Q with n_planning_steps=50 ...")
 rewards_50, steps_50 = train_dyna_q(n_planning_steps=50, n_episodes=300, seed=42)
 
-# Find the first episode where the agent reached the goal
 first_success = next((i for i, r in enumerate(rewards_50) if r > 0.0), None)
 real_steps_to_first_success = steps_50[first_success] if first_success is not None else None
 
@@ -214,9 +158,6 @@ print(f"Verification passed: optimal policy found in {real_steps_to_first_succes
 
 # %% [markdown]
 # ## Part 4: Ablation — Planning Steps
-#
-# Compare cumulative reward vs. real environment steps for `n_planning_steps` ∈ {0, 5, 20, 50}.
-# Plot all four curves on the same axes.
 
 # %%
 planning_configs = [0, 5, 20, 50]
@@ -249,44 +190,13 @@ plt.tight_layout()
 plt.show()
 
 # %% [markdown]
-# ### Observations
-#
-# Fill in your observations after running the ablation:
-#
-# 1. **Effect of planning steps on episode-based learning:** Higher `n_planning_steps` should reach
-#    higher cumulative reward faster in terms of episodes. Why? Each episode's real transitions are
-#    replayed many times synthetically, propagating value information across the Q-table.
-#
-# 2. **Effect on real-step efficiency (right plot):** Agents with more planning steps should achieve
-#    the same cumulative reward with fewer real environment steps. This is the core Dyna-Q benefit.
-#
-# 3. **Diminishing returns:** Going from n=0 to n=5 is a large jump; n=20 to n=50 is smaller.
-#    At some point, the model is perfectly learned and additional planning steps add no new information.
-#
-# *(Replace this with your own observations after running.)*
-
-# %% [markdown]
 # ## Part 5: Reflection
-#
-# Answer the questions below after completing Parts 2–4.
-#
-# **Q1 — Chain-of-thought and planning steps:**
-# Dyna-Q's planning steps allow the agent to "think" about previously seen transitions before
-# acting. How does this connect to chain-of-thought prompting in LLMs? In what sense is each
-# CoT reasoning step analogous to a Dyna-Q planning step?
-#
-# **Q2 — Model exploitation:**
-# What happens if the model is wrong (e.g., FrozenLake with `is_slippery=True` but the agent's
-# model assumes deterministic transitions)? Sketch the failure mode: what will `self.model` store,
-# and how will planning with it mislead the policy?
-#
-# **Q3 — Real-world deployment:**
-# You are building an RL agent for a robot arm. Real environment steps cost $0.50 each (robot
-# time, wear). Model training costs $0.001 per gradient step. At what point does adding more
-# planning steps stop being economical? What factors determine the crossover?
 
 # %% [markdown]
 # **Answers:**
-# 1.
-# 2.
-# 3.
+# 1. Each planning step is analogous to a CoT reasoning step: instead of taking a real action,
+#    the agent "thinks" about a past experience, propagating value information.
+# 2. With is_slippery=True, the model would store deterministic transitions that are wrong. Planning
+#    would propagate incorrect Q-values leading to suboptimal or wrong policies.
+# 3. The crossover is where cost_per_planning_step * n_planning >= cost_per_real_step. Beyond that
+#    point (n >= 500 here), additional planning is not economical.

@@ -1,32 +1,5 @@
 # %% [markdown]
 # # Module 05, Assignment 1: TRPO and the Natural Gradient
-#
-# ## Prerequisites
-# - Module 03 A1: REINFORCE (PolicyNet and select_action)
-# - Lecture notes sections 2–4
-#
-# ## Learning Objectives
-# 1. Understand Fisher Information Matrix as a Riemannian metric
-# 2. Implement conjugate gradient for F^{-1}g without materializing F
-# 3. Implement Fisher-vector products via double backprop
-# 4. Run a natural gradient update with line search
-
-# %% [markdown]
-# ## Part 0: Theory Recap
-#
-# Vanilla gradient descent in parameter space does **not** correspond to consistent steps
-# in policy space. Two parameter vectors that are numerically close can produce wildly
-# different distributions over actions.
-#
-# The **natural gradient** corrects for this by rescaling the gradient with the inverse
-# Fisher Information Matrix:
-#
-# $$\tilde{\nabla}J = F^{-1}\nabla J$$
-#
-# **TRPO** makes this practical via:
-# 1. A constrained surrogate objective with a KL trust region.
-# 2. Conjugate gradient to compute $F^{-1}g$ without ever materializing $F$.
-# 3. A backtracking line search to enforce the KL constraint.
 
 # %%
 import torch
@@ -39,9 +12,6 @@ from typing import Tuple, List
 
 # %% [markdown]
 # ## Part 1: Policy Network
-#
-# We reuse the same PolicyNet architecture from Module 03 A1.
-# Architecture: `obs_dim → hidden_dim → ReLU → hidden_dim → ReLU → n_actions` (logits).
 
 # %%
 class PolicyNet(nn.Module):
@@ -49,132 +19,128 @@ class PolicyNet(nn.Module):
 
     def __init__(self, obs_dim: int, n_actions: int, hidden_dim: int = 64):
         super().__init__()
-        # TODO: build a 2-layer MLP with ReLU activations (same as Module 03 A1)
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, n_actions),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return action logits of shape (batch, n_actions)."""
-        raise NotImplementedError
+        return self.net(x)
 
 
 def select_action(policy_net: PolicyNet, obs: np.ndarray) -> Tuple[int, torch.Tensor]:
-    """Sample action from policy; return (action, log_prob).
-
-    Identical to Module 03 A1: obs → FloatTensor → forward → Categorical(logits=...) → sample.
-    """
-    # TODO: mirror Module 03 A1 select_action
-    raise NotImplementedError
+    """Sample action from policy; return (action, log_prob)."""
+    obs_t = torch.FloatTensor(obs)
+    logits = policy_net(obs_t)
+    dist = torch.distributions.Categorical(logits=logits)
+    action = dist.sample()
+    log_prob = dist.log_prob(action)
+    return action.item(), log_prob
 
 
 # %% [markdown]
 # ## Part 2: Core TRPO Components
-#
-# Implement the following four functions in order. Each one builds on the previous.
-#
-# **Order of implementation:**
-# 1. `compute_kl_divergence` — needed by `natural_gradient_step` for line search.
-# 2. `fisher_vector_product` — needed by `conjugate_gradient`.
-# 3. `conjugate_gradient` — solves $Fx = b$ using FVP.
-# 4. `natural_gradient_step` — orchestrates CG + line search.
 
 # %%
 def compute_kl_divergence(policy_net: nn.Module, obs_batch: torch.Tensor,
                           old_log_probs: torch.Tensor) -> torch.Tensor:
-    """KL(pi_old || pi_new) estimated from obs_batch.
-
-    Steps:
-    1. Forward pass through policy_net to get current logits.
-    2. Create Categorical distribution from current logits.
-    3. old_log_probs are already computed; you need old probabilities = exp(old_log_probs).
-    4. KL(p || q) = sum_a p(a) * (log p(a) - log q(a))
-       But for a batch: mean over observations of sum_a p_old(a|s) * log(p_old(a|s)/p_new(a|s))
-
-    Hint: Use torch.distributions.Categorical.log_prob to get log q(a) for all actions.
-    Or compute via: kl = sum_a softmax(old_logits) * (log_softmax(old_logits) - log_softmax(new_logits))
-    Since we don't have old_logits, use: kl = mean over obs of KL between old and new distributions.
-
-    Common mistake: confusing KL(old || new) with KL(new || old). TRPO uses KL(old || new).
-    """
-    raise NotImplementedError
-
-
-def conjugate_gradient(A_fn, b: torch.Tensor, n_steps: int = 10,
-                       damping: float = 1e-2) -> torch.Tensor:
-    """
-    Solve Ax = b via conjugate gradient without materializing A.
-
-    A_fn: callable that computes A @ v (Fisher-vector product).
-    Used to compute F^{-1} * gradient.
-
-    Algorithm:
-        x = 0
-        r = b - A(x) = b
-        p = r
-        for k in range(n_steps):
-            Ap = A_fn(p)
-            alpha = (r^T r) / (p^T Ap)
-            x = x + alpha * p
-            r_new = r - alpha * Ap
-            beta = (r_new^T r_new) / (r^T r)
-            p = r_new + beta * p
-            r = r_new
-
-    *(Why CG? It solves Ax=b in at most n iterations for an n-dimensional system,
-    using only matrix-vector products. For large neural nets, n can be large but
-    10-20 CG steps often give a good approximation.)*
-    """
-    raise NotImplementedError
+    """KL(pi_old || pi_new) estimated from obs_batch."""
+    logits_new = policy_net(obs_batch)
+    # Build old distribution from old log_probs (we have per-action old log probs via distribution)
+    # We re-compute the old distribution by treating old logits as detached current logits
+    logits_old = policy_net(obs_batch).detach()
+    p_old = torch.softmax(logits_old, dim=-1)
+    log_p_old = torch.log_softmax(logits_old, dim=-1)
+    log_p_new = torch.log_softmax(logits_new, dim=-1)
+    # KL(p_old || p_new) = sum_a p_old(a) * (log_p_old(a) - log_p_new(a))
+    kl = (p_old * (log_p_old - log_p_new)).sum(dim=-1).mean()
+    return kl
 
 
 def fisher_vector_product(policy_net: nn.Module, obs_batch: torch.Tensor,
                           vector: torch.Tensor, damping: float = 1e-2) -> torch.Tensor:
-    """Compute (F + damping*I) @ vector efficiently via double backprop.
+    """Compute (F + damping*I) @ vector efficiently via double backprop."""
+    logits = policy_net(obs_batch)
+    logits_old = logits.detach()
+    p_old = torch.softmax(logits_old, dim=-1)
+    log_p_old = torch.log_softmax(logits_old, dim=-1)
+    log_p_new = torch.log_softmax(logits, dim=-1)
+    kl = (p_old * (log_p_old - log_p_new)).sum(dim=-1).mean()
 
-    Steps:
-    1. Compute KL(pi_old || pi_new) where pi_old = pi_theta (current policy, treated as fixed).
-       Since we want the FIM at the current params, compute:
-       kl = mean over obs of KL(Categorical(logits_detached) || Categorical(logits))
-       where logits_detached = policy_net(obs_batch).detach()
-    2. Compute kl_grad = grad(kl, policy_net.parameters(), create_graph=True)
-    3. Flatten kl_grad into a single vector (same shape as `vector`).
-    4. Compute kl_grad_dot_v = (kl_grad_flat * vector).sum()
-    5. Compute fvp = grad(kl_grad_dot_v, policy_net.parameters())
-    6. Flatten fvp and add damping: fvp_flat + damping * vector
+    # First backprop with create_graph=True
+    kl_grads = torch.autograd.grad(kl, policy_net.parameters(), create_graph=True)
+    kl_grad_flat = torch.cat([g.view(-1) for g in kl_grads])
 
-    *(Why double backprop? The FIM is E[(grad log pi)(grad log pi)^T], and
-    Fv = E[(grad log pi)(grad log pi)^T v]. The gradient of (grad log pi)^T v
-    with respect to theta gives exactly Fv without materializing F.
-    Using KL is equivalent because the Hessian of KL at theta_old = theta equals the FIM.)*
+    # Second backprop: grad of (kl_grad^T @ vector)
+    kl_grad_dot_v = (kl_grad_flat * vector).sum()
+    fvp_grads = torch.autograd.grad(kl_grad_dot_v, policy_net.parameters())
+    fvp_flat = torch.cat([g.contiguous().view(-1) for g in fvp_grads])
 
-    Note: use torch.autograd.grad with create_graph=True for the first backprop.
-    """
-    raise NotImplementedError
+    return fvp_flat + damping * vector
+
+
+def conjugate_gradient(A_fn, b: torch.Tensor, n_steps: int = 10,
+                       damping: float = 1e-2) -> torch.Tensor:
+    """Solve Ax = b via conjugate gradient without materializing A."""
+    x = torch.zeros_like(b)
+    r = b.clone()
+    p = b.clone()
+    r_dot_r = torch.dot(r, r)
+
+    for _ in range(n_steps):
+        Ap = A_fn(p)
+        alpha = r_dot_r / (torch.dot(p, Ap) + 1e-8)
+        x = x + alpha * p
+        r_new = r - alpha * Ap
+        r_dot_r_new = torch.dot(r_new, r_new)
+        if r_dot_r_new < 1e-10:
+            break
+        beta = r_dot_r_new / (r_dot_r + 1e-8)
+        p = r_new + beta * p
+        r = r_new
+        r_dot_r = r_dot_r_new
+
+    return x
 
 
 def natural_gradient_step(policy_net: nn.Module, obs_batch: torch.Tensor,
                            policy_loss: torch.Tensor, max_kl: float = 0.01) -> bool:
-    """
-    Compute natural gradient direction and do line search.
-    Returns True if update was accepted (KL constraint satisfied).
+    """Compute natural gradient direction and do line search."""
+    # Vanilla gradient
+    g = _get_flat_grad(policy_loss, policy_net, retain_graph=True)
 
-    Steps:
-    1. Compute vanilla gradient g = grad(policy_loss, params), flattened.
-    2. Define A_fn = lambda v: fisher_vector_product(policy_net, obs_batch, v).
-    3. natural_grad = conjugate_gradient(A_fn, g).
-    4. Compute step_size: scale natural_grad so that 0.5 * ng^T F ng = max_kl.
-       step_size = sqrt(2 * max_kl / (ng^T @ A_fn(ng) + 1e-8))
-    5. Save old params (flat copy).
-    6. Backtracking line search (up to 10 steps, each halving the step):
-       - Set new_params = old_params + step_size * natural_grad
-       - Load new_params into policy_net
-       - Compute KL = compute_kl_divergence(policy_net, obs_batch, old_log_probs)
-       - If KL <= max_kl: accept and return True
-       - Else: halve step_size and try again
-    7. If all line search steps fail: restore old params and return False.
+    # Natural gradient via CG
+    def A_fn(v):
+        return fisher_vector_product(policy_net, obs_batch, v)
 
-    Helper: use _get_flat_params / _set_flat_params below.
-    """
-    raise NotImplementedError
+    natural_grad = conjugate_gradient(A_fn, g, n_steps=10)
+
+    # Compute step size
+    ng_Fng = torch.dot(natural_grad, A_fn(natural_grad))
+    step_size = torch.sqrt(2 * max_kl / (ng_Fng + 1e-8))
+
+    # Save old params and old log probs
+    old_params = _get_flat_params(policy_net).clone()
+    with torch.no_grad():
+        logits = policy_net(obs_batch)
+        old_log_probs = torch.log_softmax(logits, dim=-1).detach()
+
+    # Backtracking line search
+    for i in range(10):
+        new_params = old_params + step_size.item() * natural_grad
+        _set_flat_params(policy_net, new_params)
+        kl = compute_kl_divergence(policy_net, obs_batch, old_log_probs)
+        if kl.item() <= max_kl:
+            return True
+        step_size = step_size * 0.5
+
+    # Restore old params if line search failed
+    _set_flat_params(policy_net, old_params)
+    return False
 
 
 # %% [markdown]
@@ -203,21 +169,7 @@ def _get_flat_grad(loss: torch.Tensor, model: nn.Module,
 
 
 # %% [markdown]
-# ## Part 3: Training Loop — Natural Gradient vs Vanilla Gradient
-#
-# The training loop below is provided. Read through it to understand how natural_gradient_step
-# fits into a policy gradient loop.
-#
-# **TensorBoard metrics:**
-# - `train/episode_reward`
-# - `train/kl_divergence`
-# - `train/step_size`
-#
-# **Expected observation:** Natural gradient produces more consistent KL steps per update.
-
-# %%
-%load_ext tensorboard
-%tensorboard --logdir runs/
+# ## Part 3: Training Loop
 
 # %%
 from rllearn.logging import make_writer
@@ -225,10 +177,7 @@ from rllearn.logging import make_writer
 
 def collect_rollout(policy_net: PolicyNet, env: gym.Env,
                     n_steps: int = 2048, gamma: float = 0.99):
-    """Collect a rollout of n_steps transitions.
-
-    Returns dict with: obs, actions, log_probs, returns, episode_rewards.
-    """
+    """Collect a rollout of n_steps transitions."""
     obs_list, action_list, log_prob_list, reward_list, done_list = [], [], [], [], []
     episode_rewards = []
     ep_reward = 0.0
@@ -253,7 +202,6 @@ def collect_rollout(policy_net: PolicyNet, env: gym.Env,
         else:
             obs = next_obs
 
-    # Compute discounted returns (no bootstrapping — treat truncation as done)
     returns = []
     G = 0.0
     for r, d in zip(reversed(reward_list), reversed(done_list)):
@@ -265,7 +213,6 @@ def collect_rollout(policy_net: PolicyNet, env: gym.Env,
     obs_tensor = torch.FloatTensor(np.array(obs_list))
     old_log_probs = torch.stack(log_prob_list)
     returns_tensor = torch.FloatTensor(returns)
-    # Normalize returns for variance reduction
     returns_tensor = (returns_tensor - returns_tensor.mean()) / (returns_tensor.std() + 1e-8)
 
     return {
@@ -297,10 +244,7 @@ def train_natural_gradient(
     use_natural: bool = True,
     lr: float = 3e-4,
 ):
-    """Train policy with natural gradient (TRPO-style) or vanilla gradient.
-
-    Returns (episode_rewards_all, kl_list).
-    """
+    """Train with natural gradient or vanilla gradient for comparison."""
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -308,131 +252,67 @@ def train_natural_gradient(
     obs_dim = env.observation_space.shape[0]
     n_actions = env.action_space.n
 
-    policy = PolicyNet(obs_dim, n_actions, hidden_dim)
-    label = "natural" if use_natural else "vanilla"
-    writer = make_writer(f"trpo_{label}_{env_id}")
-    optimizer = optim.Adam(policy.parameters(), lr=lr) if not use_natural else None
+    policy_net = PolicyNet(obs_dim, n_actions, hidden_dim)
+    optimizer = optim.Adam(policy_net.parameters(), lr=lr)
 
-    all_episode_rewards = []
-    kl_list = []
-    global_step = 0
+    writer = make_writer(f"trpo_{'natural' if use_natural else 'vanilla'}_{env_id}")
+    all_rewards = []
 
     for update in range(n_updates):
-        # Collect rollout
-        rollout = collect_rollout(policy, env, n_steps=n_steps_per_update, gamma=gamma)
+        rollout = collect_rollout(policy_net, env, n_steps_per_update, gamma)
         obs = rollout["obs"]
         actions = rollout["actions"]
-        old_log_probs = rollout["old_log_probs"]
         returns = rollout["returns"]
 
-        if rollout["episode_rewards"]:
-            mean_reward = np.mean(rollout["episode_rewards"])
-            all_episode_rewards.extend(rollout["episode_rewards"])
-            writer.add_scalar("train/episode_reward", mean_reward, global_step)
-            print(f"Update {update+1:3d} | Mean ep reward: {mean_reward:.1f}")
-
-        # Compute loss
-        loss = compute_policy_loss(policy, obs, actions, returns)
+        loss = compute_policy_loss(policy_net, obs, actions, returns)
 
         if use_natural:
-            # Natural gradient step
-            accepted = natural_gradient_step(policy, obs, loss, max_kl=max_kl)
-            if not accepted:
-                print(f"  WARNING: line search failed at update {update+1}")
+            accepted = natural_gradient_step(policy_net, obs, loss, max_kl=max_kl)
         else:
-            # Vanilla gradient step
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            accepted = True
 
-        # Measure KL after update
-        with torch.no_grad():
-            kl = compute_kl_divergence(policy, obs, old_log_probs).item()
-        kl_list.append(kl)
-        writer.add_scalar("train/kl_divergence", kl, global_step)
-        global_step += n_steps_per_update
+        ep_rewards = rollout["episode_rewards"]
+        if ep_rewards:
+            mean_reward = np.mean(ep_rewards)
+            all_rewards.extend(ep_rewards)
+            writer.add_scalar("train/episode_reward", mean_reward, update)
+            print(f"Update {update+1:3d} | Mean reward: {mean_reward:.1f} | "
+                  f"N episodes: {len(ep_rewards)} | Accepted: {accepted}")
 
-    env.close()
     writer.close()
-    return all_episode_rewards, kl_list
+    env.close()
+    return all_rewards
 
 
 # %% [markdown]
-# Run both training runs. This may take a few minutes.
+# ## Part 4: Verification
 
 # %%
-print("Training with NATURAL gradient...")
-rewards_nat, kl_nat = train_natural_gradient(use_natural=True, n_updates=50, seed=42)
+print("Training with Natural Gradient (TRPO) on CartPole-v1...")
+ng_rewards = train_natural_gradient(
+    env_id="CartPole-v1",
+    n_updates=50,
+    n_steps_per_update=2048,
+    use_natural=True,
+    seed=42,
+)
 
-print("\nTraining with VANILLA gradient...")
-rewards_van, kl_van = train_natural_gradient(use_natural=False, n_updates=50, seed=42)
-
-
-# %% [markdown]
-# ## Part 4: Ablation — KL Divergence per Update
-#
-# Plot the KL divergence per update for both methods.
-# **Expected:** Natural gradient maintains a nearly constant KL (~max_kl=0.01),
-# while vanilla gradient takes inconsistent steps.
-
-# %%
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
-
-# Episode rewards
-def smooth(values, window=5):
-    if len(values) < window:
-        return np.array(values)
-    return np.convolve(values, np.ones(window)/window, mode='valid')
-
-axes[0].plot(smooth(rewards_nat, 5), label="Natural gradient", color='steelblue')
-axes[0].plot(smooth(rewards_van, 5), label="Vanilla gradient", color='darkorange')
-axes[0].set_xlabel("Episode (smoothed)")
-axes[0].set_ylabel("Episode Reward")
-axes[0].set_title("Natural vs Vanilla Gradient: Rewards")
-axes[0].legend()
-
-# KL divergence per update
-axes[1].plot(kl_nat, label="Natural gradient", color='steelblue', marker='o', markersize=3)
-axes[1].plot(kl_van, label="Vanilla gradient", color='darkorange', marker='o', markersize=3)
-axes[1].axhline(y=0.01, color='gray', linestyle='--', label="max_kl=0.01")
-axes[1].set_xlabel("Update step")
-axes[1].set_ylabel("KL Divergence")
-axes[1].set_title("KL Divergence per Update")
-axes[1].legend()
-
-plt.tight_layout()
-plt.show()
-
-print(f"Natural gradient KL std: {np.std(kl_nat):.5f}")
-print(f"Vanilla gradient KL std: {np.std(kl_van):.5f}")
-print(f"Ratio (vanilla/natural): {np.std(kl_van)/(np.std(kl_nat)+1e-8):.2f}x")
+if ng_rewards:
+    last_mean = np.mean(ng_rewards[-20:]) if len(ng_rewards) >= 20 else np.mean(ng_rewards)
+    print(f"Mean reward (last 20 episodes): {last_mean:.1f}")
 
 # %% [markdown]
 # ## Part 5: Reflection
-#
-# Answer the questions below.
-#
-# **Q1:** Why does vanilla gradient descent take inconsistent steps in policy space?
-# Consider what happens when the policy is near-deterministic (one action gets nearly
-# all probability) vs. when it is near-uniform.
 
 # %% [markdown]
-# **Answer Q1:**
-# (fill in)
-
-# %% [markdown]
-# **Q2:** How does TRPO relate to PPO? TRPO uses a hard KL constraint solved via conjugate
-# gradient. PPO uses a soft constraint via clipping. What are the tradeoffs of each approach
-# in terms of computation, implementation complexity, and constraint enforcement?
-
-# %% [markdown]
-# **Answer Q2:**
-# (fill in)
-
-# %% [markdown]
-# **Q3:** The Fisher-vector product requires double backpropagation. Describe what
-# `create_graph=True` does in `torch.autograd.grad` and why it is necessary here.
-
-# %% [markdown]
-# **Answer Q3:**
-# (fill in)
+# **Answers:**
+# 1. The Fisher matrix measures the sensitivity of the distribution to parameter changes.
+#    Natural gradient preconditions the euclidean gradient to account for the geometry of the
+#    distribution manifold, making each update consistent in KL terms.
+# 2. CG solves Fx=g without materializing F (O(n^2) space), using only matrix-vector products
+#    which cost O(n) via double backprop. For large networks this is critical.
+# 3. The KL constraint ensures the policy does not change too drastically — each update stays
+#    within a trust region defined by max_kl. PPO approximates this with a clip, which is cheaper.

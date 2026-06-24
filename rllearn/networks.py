@@ -15,12 +15,16 @@ class MLP(nn.Module):
     def __init__(self, input_dim: int, output_dim: int,
                  hidden_dims: list[int] = (256, 256), activation=nn.ReLU):
         super().__init__()
-        # TODO (Module 02, A2): build nn.Sequential from input_dim → hidden_dims → output_dim
-        # Use activation() between layers; no activation on final layer
-        raise NotImplementedError
+        layers = []
+        dims = [input_dim] + list(hidden_dims) + [output_dim]
+        for i in range(len(dims) - 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < len(dims) - 2:
+                layers.append(activation())
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
+        return self.net(x)
 
 
 class DuelingNet(nn.Module):
@@ -34,13 +38,20 @@ class DuelingNet(nn.Module):
 
     def __init__(self, obs_dim: int, n_actions: int, hidden_dim: int = 256):
         super().__init__()
-        # TODO (Module 02, A3): shared trunk MLP, then separate value and advantage heads
-        raise NotImplementedError
+        self.trunk = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        )
+        self.value_head = nn.Linear(hidden_dim, 1)
+        self.advantage_head = nn.Linear(hidden_dim, n_actions)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Return Q-values of shape (batch, n_actions)."""
-        # TODO: combine V and A with mean-subtraction trick
-        raise NotImplementedError
+        feat = self.trunk(x)
+        V = self.value_head(feat)           # (B, 1)
+        A = self.advantage_head(feat)       # (B, n_actions)
+        Q = V + A - A.mean(dim=1, keepdim=True)
+        return Q
 
 
 class ActorCritic(nn.Module):
@@ -52,12 +63,19 @@ class ActorCritic(nn.Module):
 
     def __init__(self, obs_dim: int, n_actions: int, hidden_dim: int = 256):
         super().__init__()
-        # TODO (Module 03, A2): shared trunk + actor head (logits) + critic head (scalar)
-        raise NotImplementedError
+        self.trunk = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        )
+        self.actor_head = nn.Linear(hidden_dim, n_actions)
+        self.critic_head = nn.Linear(hidden_dim, 1)
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (action_logits, state_value). Shapes: (B, n_actions), (B,)."""
-        raise NotImplementedError
+        feat = self.trunk(x)
+        logits = self.actor_head(feat)
+        value = self.critic_head(feat).squeeze(-1)
+        return logits, value
 
 
 class GaussianPolicyHead(nn.Module):
@@ -75,12 +93,19 @@ class GaussianPolicyHead(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # TODO (Module 05, A2): trunk MLP → mean head + log_std head
-        raise NotImplementedError
+        self.net = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+        )
+        self.mean_head = nn.Linear(hidden_dim, action_dim)
+        self.log_std_head = nn.Linear(hidden_dim, action_dim)
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (mean, log_std) before squashing."""
-        raise NotImplementedError
+        feat = self.net(obs)
+        mean = self.mean_head(feat)
+        log_std = torch.clamp(self.log_std_head(feat), self.LOG_STD_MIN, self.LOG_STD_MAX)
+        return mean, log_std
 
     def sample(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (action, log_prob) using reparameterization trick.
@@ -88,7 +113,14 @@ class GaussianPolicyHead(nn.Module):
         action = tanh(mean + std * eps)
         log_prob -= sum(log(1 - action^2 + eps))   # squashing correction
         """
-        raise NotImplementedError
+        mean, log_std = self.forward(obs)
+        std = log_std.exp()
+        normal = torch.distributions.Normal(mean, std)
+        x_t = normal.rsample()
+        y_t = torch.tanh(x_t)
+        log_prob = normal.log_prob(x_t) - torch.log(1 - y_t.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1)
+        return y_t, log_prob
 
 
 class TwinQNetwork(nn.Module):
@@ -100,9 +132,22 @@ class TwinQNetwork(nn.Module):
 
     def __init__(self, obs_dim: int, action_dim: int, hidden_dim: int = 256):
         super().__init__()
-        # TODO (Module 05, A2): two independent MLP Q-networks
-        raise NotImplementedError
+        self.q1 = nn.Sequential(
+            nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        self.q2 = nn.Sequential(
+            nn.Linear(obs_dim + action_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
 
     def forward(self, obs: torch.Tensor, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Return (Q1, Q2) both of shape (batch,)."""
-        raise NotImplementedError
+        sa = torch.cat([obs, action], dim=-1)
+        return self.q1(sa).squeeze(-1), self.q2(sa).squeeze(-1)
+
+    def q1_forward(self, obs: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+        sa = torch.cat([obs, action], dim=-1)
+        return self.q1(sa).squeeze(-1)
